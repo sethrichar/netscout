@@ -14,6 +14,7 @@ import (
 	"github.com/sethrichar/netscout/internal/config"
 	"github.com/sethrichar/netscout/internal/engine"
 	"github.com/sethrichar/netscout/internal/model"
+	"github.com/sethrichar/netscout/internal/oui"
 	"github.com/sethrichar/netscout/internal/parse"
 	"github.com/sethrichar/netscout/internal/store"
 	"github.com/sethrichar/netscout/internal/term"
@@ -24,6 +25,7 @@ type rtime struct {
 	dataDir string
 	store   *store.Store
 	engine  *engine.Engine
+	oui     *oui.DB
 	iface   capture.Interface
 	session *capture.Session // nil when running in passive fallback mode
 	passive bool
@@ -52,7 +54,11 @@ func newRuntime(ifaceName string, onlineWindow, conflictWindow time.Duration, bp
 	if err != nil {
 		return nil, err
 	}
-	rt := &rtime{dataDir: dir, store: st, logger: logger}
+	db, err := oui.Load(dir)
+	if err != nil {
+		logger.Printf("oui: %v (vendor lookup disabled)", err)
+	}
+	rt := &rtime{dataDir: dir, store: st, oui: db, logger: logger}
 
 	rt.iface, err = capture.FindInterface(ifaceName)
 	if err != nil {
@@ -81,7 +87,10 @@ func newRuntime(ifaceName string, onlineWindow, conflictWindow time.Duration, bp
 		}
 	}
 
-	var vendors engine.VendorLookup // wired in Phase 2 (OUI lookup)
+	var vendors engine.VendorLookup
+	if db != nil {
+		vendors = db
+	}
 	rt.engine, err = engine.New(st, engine.Options{
 		Interface:      rt.iface.Name,
 		LocalNets:      rt.iface.LocalNets(),

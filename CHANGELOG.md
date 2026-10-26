@@ -3,6 +3,25 @@
 All notable changes to netscout. Working revisions are `0.x`; published
 releases are whole numbers. Versions are never removed — only revised up.
 
+## v0.3 — Phase 2: MAC vendor lookup
+
+- Bundled Wireshark vendor database (`assets/oui/manuf`, 58k+ assignments:
+  IEEE OUI/24, MA-M/28, MA-S/36) embedded in the binary — lookups are fully
+  offline. Generated from Wireshark's `epan/manuf-data.c` with
+  `tools/manufconv`, since Wireshark ≥ 4.2 no longer ships the text file in git.
+- `oui` package: manuf text + C-source parsers, longest-prefix lookup,
+  randomized / multicast classification, vendor search, loader that prefers an
+  updated copy in the data dir, `Update` that downloads from wireshark.org and
+  falls back to the GitHub mirror (validated: never replaces good data with a
+  truncated download).
+- `netscout lookup <mac…>` (`--json`, `--search <vendor>`),
+  `netscout update-oui`.
+- Vendor wired into the engine and the live table; randomized MACs show as
+  "randomized" rather than "unknown".
+- Tests cover Audinate, Yamaha, Shure, QSC, Apple, Cisco, Allen & Heath
+  (registered as Audiotonix), 28/36-bit longest-prefix matching and the
+  update fallback path.
+
 ## v0.2 — Phase 1: passive capture + ARP
 
 - `capture.Session`: pcap live capture with immediate mode, BPF, frame
