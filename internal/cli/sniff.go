@@ -19,6 +19,8 @@ var (
 	sniffNoTUI          bool
 	sniffOnlineWindow   time.Duration
 	sniffConflictWindow time.Duration
+	sniffScan           bool
+	sniffScanCIDR       string
 )
 
 var sniffCmd = &cobra.Command{
@@ -45,6 +47,10 @@ table and explains how to enable capture.`,
 
 		ctx, cancel := signalContext()
 		defer cancel()
+
+		if sniffScan {
+			go rt.startScan(ctx, sniffScanCIDR)
+		}
 
 		useTUI := !sniffNoTUI && nterm.IsTTY()
 		if useTUI {
@@ -117,5 +123,7 @@ func init() {
 	sniffCmd.Flags().BoolVar(&sniffNoTUI, "no-tui", false, "print events as log lines instead of a live table")
 	sniffCmd.Flags().DurationVar(&sniffOnlineWindow, "online-window", 5*time.Minute, "mark devices offline after this much silence")
 	sniffCmd.Flags().DurationVar(&sniffConflictWindow, "conflict-window", 2*time.Minute, "same IP from two MACs within this window is a conflict")
+	sniffCmd.Flags().BoolVar(&sniffScan, "scan", false, "ARP-sweep the local subnet first (twice), then keep listening")
+	sniffCmd.Flags().StringVar(&sniffScanCIDR, "scan-cidr", "", "CIDR to sweep with --scan (default: the interface's subnet)")
 	rootCmd.AddCommand(sniffCmd)
 }

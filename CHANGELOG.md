@@ -3,6 +3,25 @@
 All notable changes to netscout. Working revisions are `0.x`; published
 releases are whole numbers. Versions are never removed — only revised up.
 
+## v0.4 — Phase 3: more parsers + active scan
+
+- `scan` package: rate-limited ARP sweep injected through the capture handle
+  (replies flow through the normal parse pipeline), optional ICMP echo sweep
+  via an unprivileged datagram socket where the OS allows it, subnet host
+  enumeration with a /16 safety cap. A /24 completes in ~5 s with two passes.
+- `netscout scan [cidr]` — self-contained sweep that prints IP / MAC / vendor /
+  label for everything that answers and records it in the database.
+- `netscout sniff --scan [--scan-cidr]` — sweep first, then keep listening.
+- DHCP (hostname, vendor class, requested IP, server), mDNS/Bonjour (hostname,
+  DNS-SD services incl. Dante `_netaudio-*`), LLDP (chassis, port, sysname,
+  sysdesc, management IP, capabilities) and CDP parsers are now exercised
+  end-to-end; the live table shows the richest facts in its INFO column with
+  friendly service names (Dante, AirPlay, Q-SYS, …).
+- IP conflict detection (same IP claimed by two MACs within the conflict
+  window) raises a `conflict` event, marks both devices and highlights them in
+  red in the terminal. Lease changes after the previous owner has gone quiet
+  are not flagged.
+
 ## v0.3 — Phase 2: MAC vendor lookup
 
 - Bundled Wireshark vendor database (`assets/oui/manuf`, 58k+ assignments:
