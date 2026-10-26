@@ -142,11 +142,13 @@ func TestMeta(t *testing.T) {
 }
 
 func TestOpenWithAwkwardPath(t *testing.T) {
+	// '#' and '%' have meaning in SQLite's file: URI parser; '?' too, but it
+	// is not a legal filename character on Windows so it is not exercised.
 	dir := filepath.Join(t.TempDir(), "show #3 100%")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, "net?scout.db")
+	path := filepath.Join(dir, "net#scout 50%.db")
 	s, err := Open(path)
 	if err != nil {
 		t.Fatalf("open: %v", err)
