@@ -3,6 +3,27 @@
 All notable changes to netscout. Working revisions are `0.x`; published
 releases are whole numbers. Versions are never removed — only revised up.
 
+## v0.5 — Phase 4: IPAM core
+
+- Subnets (CIDR, name, VLAN, gateway, notes) and reservations (IP → MAC +
+  label) with CRUD in the store; most-specific-subnet lookup for any IP.
+- `ipam` package (pure, fully unit-tested): per-address status — free,
+  reserved, in-use, match, mismatch (squatter on a reserved IP, or the reserved
+  MAC sitting elsewhere), conflict — plus summary counts, history of previous
+  occupants, next-free search, and a "current binding" rule (seen within a
+  window, or a device's most recent address).
+- CLI: `subnet add|set|list|show|rm|free`, `reserve` / `unreserve` /
+  `reservations`, `devices [filter]`, `device show|set|rm` (labels, notes,
+  tags; accepts MAC, IP, label or hostname), `events`.
+- `export --csv|--json` (devices, or `--what reservations` for the IP plan;
+  JSON is a full re-importable snapshot) and `import <file>` for client IP
+  sheets: loose CSV header matching (ip/address, mac, name/label/device,
+  notes, subnet, tags, vlan), headerless and tab/semicolon files, `--subnet`,
+  `--auto-subnets`, `--dry-run`. Plan labels are carried onto devices that
+  have none.
+- Devices created only from a plan show "never" seen until observed; devices
+  recorded before the vendor DB was available are classified on first sighting.
+
 ## v0.4 — Phase 3: more parsers + active scan
 
 - `scan` package: rate-limited ARP sweep injected through the capture handle

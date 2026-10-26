@@ -177,8 +177,8 @@ ON CONFLICT(mac) DO UPDATE SET
     vendor       = excluded.vendor,
     vendor_short = excluded.vendor_short,
     hostname     = excluded.hostname,
-    first_seen   = MIN(devices.first_seen, excluded.first_seen),
-    last_seen    = MAX(devices.last_seen, excluded.last_seen),
+    first_seen   = CASE WHEN devices.first_seen = '' THEN excluded.first_seen ELSE MIN(devices.first_seen, excluded.first_seen) END,
+    last_seen    = CASE WHEN devices.last_seen = '' THEN excluded.last_seen ELSE MAX(devices.last_seen, excluded.last_seen) END,
     online       = excluded.online,
     iface        = excluded.iface,
     randomized   = excluded.randomized`,
@@ -212,9 +212,9 @@ ON CONFLICT(mac, key) DO UPDATE SET value = excluded.value, updated_at = exclude
 // SetUserFields updates label/notes/tags, creating a placeholder device row if
 // the MAC has never been observed (so labels can be prepared ahead of a show).
 func (s *Store) SetUserFields(mac string, label, notes *string, tags []string) error {
-	now := fmtTime(time.Now())
 	return s.tx(func(tx *sql.Tx) error {
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO devices (mac, first_seen, last_seen) VALUES (?, ?, ?)`, mac, now, now); err != nil {
+		// Placeholder rows carry empty timestamps: "never seen".
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO devices (mac, first_seen, last_seen) VALUES (?, '', '')`, mac); err != nil {
 			return fmt.Errorf("ensuring device %s: %w", mac, err)
 		}
 		if label != nil {

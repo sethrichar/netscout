@@ -203,6 +203,17 @@ func (e *Engine) Observe(o model.Observation) {
 	d := &ds.dev
 	var events []model.Event
 
+	// Devices that pre-existed as placeholders (imported labels) or were saved
+	// before the vendor DB was available get classified on first sighting.
+	if d.Vendor == "" {
+		d.Randomized = model.IsRandomizedMAC(mac)
+		if e.opts.Vendors != nil {
+			if short, long, ok := e.opts.Vendors.Lookup(mac); ok {
+				d.Vendor, d.VendorShort = long, short
+			}
+		}
+	}
+
 	if o.Timestamp.After(d.LastSeen) {
 		d.LastSeen = o.Timestamp
 	}

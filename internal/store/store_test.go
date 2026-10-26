@@ -71,6 +71,26 @@ func TestDeviceRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPlaceholderDeviceTimestamps(t *testing.T) {
+	s := openTest(t)
+	label := "Planned stagebox"
+	if err := s.SetUserFields("00:1d:c1:00:00:77", &label, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := s.GetDevice("00:1d:c1:00:00:77")
+	if d == nil || !d.FirstSeen.IsZero() || !d.LastSeen.IsZero() {
+		t.Fatalf("placeholder should have zero timestamps: %+v", d)
+	}
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := s.SaveObserved(&model.Device{MAC: d.MAC, FirstSeen: now, LastSeen: now}, nil); err != nil {
+		t.Fatal(err)
+	}
+	d, _ = s.GetDevice(d.MAC)
+	if !d.FirstSeen.Equal(now) || !d.LastSeen.Equal(now) || d.Label != label {
+		t.Errorf("first observation should fill timestamps and keep label: %+v", d)
+	}
+}
+
 func TestEventsAndObservations(t *testing.T) {
 	s := openTest(t)
 	for i := 0; i < 5; i++ {
