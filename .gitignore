@@ -1,0 +1,22 @@
+# build output
+/dist/
+/bin/
+/netscout
+/netscout.exe
+*.test
+*.out
+
+# local data / databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+/data/
+/.netscout/
+
+# editor / OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
