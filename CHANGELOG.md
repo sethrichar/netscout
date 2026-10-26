@@ -3,6 +3,32 @@
 All notable changes to netscout. Working revisions are `0.x`; published
 releases are whole numbers. Versions are never removed — only revised up.
 
+## v0.6 — Phase 5: local web UI
+
+- `netscout ui` (also the default when the binary is run with no arguments,
+  e.g. double-clicked): captures and serves a single-page UI on
+  `127.0.0.1:<random port>`, opening the browser automatically (`--no-open`,
+  `--port`, `--scan`, `--scan-every 5m`). Loopback only, with a Host-header
+  check against DNS rebinding.
+- **Live** tab: sortable, filterable device table (online state, IP, MAC,
+  vendor, name, tags, services/info, last seen) updating via server-sent
+  events; click a row for a drawer with every fact, IP history, observations,
+  events and inline label/tags/notes editing, "reserve this IP", forget.
+- **Subnets** tab: add/edit/delete subnets, a colour heatmap of every address
+  (free / reserved / in use / match / mismatch / conflict, online dot, gateway
+  marker), click any cell to see who is there and reserve it, status-filtered
+  address table, per-subnet scan.
+- **Events** tab: live log with kind filters; conflicts flagged in the tab
+  badge and as toasts, clearable in place.
+- **Settings** tab: switch capture interface without restarting, scan now /
+  repeat every N minutes, vendor DB status + one-click update from Wireshark,
+  MAC lookup box, export (JSON / devices CSV / plan CSV), import a plan with
+  dry run.
+- JSON API under `/api/*` for everything above; `/api/stream` is SSE.
+- Runtime refactor: capture can be stopped and reopened on another interface
+  while the engine keeps its state; periodic scan scheduler; OUI hot-swap.
+- Vanilla HTML/CSS/JS embedded in the binary — no build step, works offline.
+
 ## v0.5 — Phase 4: IPAM core
 
 - Subnets (CIDR, name, VLAN, gateway, notes) and reservations (IP → MAC +

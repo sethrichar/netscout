@@ -48,17 +48,19 @@ table and explains how to enable capture.`,
 		ctx, cancel := signalContext()
 		defer cancel()
 
+		rt.start(ctx)
 		if sniffScan {
-			go rt.startScan(ctx, sniffScanCIDR)
+			if err := rt.startScan(ctx, sniffScanCIDR); err != nil {
+				logger.Printf("scan: %v", err)
+			}
 		}
 
 		useTUI := !sniffNoTUI && nterm.IsTTY()
 		if useTUI {
 			nterm.EnableVT()
-			done := rt.runAsync(ctx)
 			err := runTUI(ctx, rt)
 			cancel()
-			waitStopped(done, 3*time.Second)
+			rt.stop()
 			return err
 		}
 		// Log mode: stream events as lines.
@@ -72,7 +74,8 @@ table and explains how to enable capture.`,
 				fmt.Println(eventLine(ev))
 			}
 		}()
-		rt.run(ctx)
+		<-ctx.Done()
+		rt.stop()
 		return nil
 	},
 }

@@ -116,9 +116,30 @@ func New(st *store.Store, opts Options) (*Engine, error) {
 		if d.Hostname != "" {
 			ds.hostSource = 1
 		}
+		e.classify(ds)
 		e.devices[d.MAC] = ds
 	}
 	return e, nil
+}
+
+// classify fills vendor and the randomized flag for a device that lacks them
+// (placeholders from an imported plan, or rows saved before vendor data was
+// available). Cheap: two map lookups.
+func (e *Engine) classify(ds *devState) {
+	d := &ds.dev
+	if d.Vendor != "" {
+		return
+	}
+	if r := model.IsRandomizedMAC(d.MAC); r != d.Randomized {
+		d.Randomized = r
+		ds.dirty = true
+	}
+	if e.opts.Vendors != nil {
+		if short, long, ok := e.opts.Vendors.Lookup(d.MAC); ok {
+			d.Vendor, d.VendorShort = long, short
+			ds.dirty = true
+		}
+	}
 }
 
 // Run flushes dirty devices and sweeps for offline devices until ctx ends.
@@ -165,14 +186,14 @@ func (e *Engine) Observe(o model.Observation) {
 	if o.Timestamp.IsZero() {
 		o.Timestamp = time.Now()
 	}
-	if o.IP != "" && !e.acceptIP(o) {
-		o.IP = ""
-	}
 
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
 		return
+	}
+	if o.IP != "" && !e.acceptIP(o) {
+		o.IP = ""
 	}
 	ds, isNew := e.devices[mac], false
 	if ds == nil {
@@ -203,16 +224,7 @@ func (e *Engine) Observe(o model.Observation) {
 	d := &ds.dev
 	var events []model.Event
 
-	// Devices that pre-existed as placeholders (imported labels) or were saved
-	// before the vendor DB was available get classified on first sighting.
-	if d.Vendor == "" {
-		d.Randomized = model.IsRandomizedMAC(mac)
-		if e.opts.Vendors != nil {
-			if short, long, ok := e.opts.Vendors.Lookup(mac); ok {
-				d.Vendor, d.VendorShort = long, short
-			}
-		}
-	}
+	e.classify(ds)
 
 	if o.Timestamp.After(d.LastSeen) {
 		d.LastSeen = o.Timestamp
@@ -501,6 +513,7 @@ func (e *Engine) SetUserFields(mac string, label, notes *string, tags []string) 
 			if ds.dev.Attrs == nil {
 				ds.dev.Attrs = map[string]string{}
 			}
+			e.classify(ds)
 			e.devices[mac] = ds
 		}
 	}
@@ -583,7 +596,60 @@ func (e *Engine) Subscribe() (<-chan model.Event, func()) {
 func (e *Engine) Store() *store.Store { return e.store }
 
 // Options returns the engine configuration.
-func (e *Engine) Options() Options { return e.opts }
+func (e *Engine) Options() Options {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.opts
+}
+
+// SetInterface updates the capture interface facts used for IP acceptance and
+// self-detection (after the operator switches interfaces in the UI).
+func (e *Engine) SetInterface(name string, nets []*net.IPNet, selfMAC string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.opts.Interface, e.opts.LocalNets, e.opts.SelfMAC = name, nets, selfMAC
+	for mac, ds := range e.devices {
+		if mac == selfMAC {
+			ds.dev.Attrs["self"] = "true"
+			ds.dirty = true
+		} else if ds.dev.Attrs["self"] == "true" {
+			delete(ds.dev.Attrs, "self")
+			ds.dirty = true
+		}
+	}
+}
+
+// SetVendors swaps the vendor lookup (after update-oui) and re-resolves
+// devices that have no vendor yet.
+func (e *Engine) SetVendors(v VendorLookup) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.opts.Vendors = v
+	if v == nil {
+		return
+	}
+	for mac, ds := range e.devices {
+		if ds.dev.Vendor == "" {
+			if short, long, ok := v.Lookup(mac); ok {
+				ds.dev.Vendor, ds.dev.VendorShort = long, short
+				ds.dirty = true
+			}
+		}
+	}
+}
+
+// IPBindings returns every (MAC, IP) pair known in memory with its window.
+func (e *Engine) IPBindings() []store.IPBinding {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	var out []store.IPBinding
+	for mac, ds := range e.devices {
+		for _, ip := range ds.ips {
+			out = append(out, store.IPBinding{MAC: mac, IP: ip.IP, FirstSeen: ip.FirstSeen, LastSeen: ip.LastSeen})
+		}
+	}
+	return out
+}
 
 func (e *Engine) logf(format string, args ...any) {
 	if e.opts.Logger != nil {

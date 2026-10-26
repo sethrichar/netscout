@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>netscout</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%230f1720'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%2334d399'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%2334d399' stroke-opacity='.5' stroke-width='2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="dot live" id="live-dot"></span>netscout</div>
+  <nav class="tabs" id="tabs">
+    <button data-tab="live" class="active">Live</button>
+    <button data-tab="subnets">Subnets</button>
+    <button data-tab="events">Events <span class="badge" id="conflict-badge" hidden>0</span></button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+  <div class="stats" id="stats">
+    <span class="pill" id="mode-pill" title="capture mode">starting…</span>
+    <span class="pill"><b id="stat-online">0</b> online</span>
+    <span class="pill"><b id="stat-devices">0</b> devices</span>
+    <span class="pill dim"><b id="stat-pkts">0</b> pkts</span>
+  </div>
+</header>
+
+<div class="banner warn" id="passive-banner" hidden>
+  <b>Passive mode:</b> packet capture is not available, so netscout is only reading the OS ARP table.
+  <pre id="passive-hint"></pre>
+</div>
+
+<main>
+<!-- ============================ LIVE ============================ -->
+<section id="tab-live" class="tab active">
+  <div class="toolbar">
+    <input id="search" type="search" placeholder="filter: ip, mac, vendor, name, tag, service…" autocomplete="off">
+    <label class="check"><input type="checkbox" id="only-online"> online only</label>
+    <span class="spacer"></span>
+    <button id="btn-scan" class="primary" title="ARP-sweep the local subnet to wake up quiet devices">Scan subnet</button>
+  </div>
+  <div class="table-wrap">
+    <table id="devices" class="data">
+      <thead><tr>
+        <th data-sort="online" class="w-dot"></th>
+        <th data-sort="ip">IP</th>
+        <th data-sort="mac">MAC</th>
+        <th data-sort="vendor">Vendor</th>
+        <th data-sort="name">Name</th>
+        <th data-sort="tags">Tags</th>
+        <th data-sort="info">Info</th>
+        <th data-sort="last_seen" class="num">Last seen</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="empty" id="devices-empty" hidden>Waiting for traffic… try <b>Scan subnet</b>.</div>
+  </div>
+</section>
+
+<!-- ============================ SUBNETS ============================ -->
+<section id="tab-subnets" class="tab">
+  <div class="split">
+    <aside class="side">
+      <h2>Subnets</h2>
+      <ul id="subnet-list" class="list"></ul>
+      <form id="subnet-form" class="stack">
+        <h3>Add subnet</h3>
+        <input name="cidr" placeholder="10.0.0.0/24" required>
+        <input name="name" placeholder="name (Dante primary)">
+        <div class="row"><input name="vlan" placeholder="vlan" type="number" min="0" max="4094"><input name="gateway" placeholder="gateway"></div>
+        <button class="primary">Add</button>
+      </form>
+    </aside>
+    <div class="main" id="subnet-detail">
+      <div class="empty">Add a subnet to see its address map.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ EVENTS ============================ -->
+<section id="tab-events" class="tab">
+  <div class="toolbar">
+    <div class="chips" id="event-filters">
+      <button data-kind="" class="active">all</button>
+      <button data-kind="conflict" class="k-conflict">conflicts</button>
+      <button data-kind="new_device" class="k-new_device">new</button>
+      <button data-kind="ip_change" class="k-ip_change">ip changes</button>
+      <button data-kind="hostname">hostnames</button>
+      <button data-kind="offline">offline</button>
+      <button data-kind="online">online</button>
+      <button data-kind="scan">scans</button>
+    </div>
+  </div>
+  <ol id="event-list" class="events"></ol>
+</section>
+
+<!-- ============================ SETTINGS ============================ -->
+<section id="tab-settings" class="tab">
+  <div class="cards">
+    <div class="card">
+      <h2>Capture</h2>
+      <label>Interface
+        <select id="iface-select"></select>
+      </label>
+      <button id="btn-iface" class="primary">Switch interface</button>
+      <p class="muted" id="iface-status"></p>
+    </div>
+    <div class="card">
+      <h2>Scanning</h2>
+      <label>CIDR to sweep <input id="scan-cidr" placeholder="(interface subnet)"></label>
+      <div class="row">
+        <button id="btn-scan2" class="primary">Scan now</button>
+        <label>repeat every
+          <select id="scan-every">
+            <option value="0">off</option>
+            <option value="60">1 min</option>
+            <option value="300">5 min</option>
+            <option value="900">15 min</option>
+            <option value="3600">1 hour</option>
+          </select>
+        </label>
+      </div>
+      <p class="muted" id="scan-status"></p>
+    </div>
+    <div class="card">
+      <h2>Vendor database</h2>
+      <p class="muted" id="oui-status"></p>
+      <button id="btn-oui">Download latest from Wireshark</button>
+      <p class="muted">Look up any MAC: <input id="lookup-mac" placeholder="00:1d:c1:…" size="20"> <span id="lookup-result"></span></p>
+    </div>
+    <div class="card">
+      <h2>Export</h2>
+      <div class="row wrap">
+        <a class="button" href="/api/export?format=json" download>Everything (JSON)</a>
+        <a class="button" href="/api/export?format=csv" download>Devices (CSV)</a>
+        <a class="button" href="/api/export?format=csv&what=reservations" download>IP plan (CSV)</a>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Import IP plan</h2>
+      <form id="import-form" class="stack">
+        <input type="file" name="file" accept=".csv,.json,.txt,.tsv" required>
+        <label>Default subnet for rows that fit none <input name="subnet" placeholder="10.0.0.0/24"></label>
+        <label class="check"><input type="checkbox" name="auto_subnets"> create /24s automatically</label>
+        <div class="row"><button class="primary">Import</button><button type="button" id="btn-import-dry">Dry run</button></div>
+        <pre id="import-result" class="muted"></pre>
+      </form>
+    </div>
+    <div class="card">
+      <h2>About</h2>
+      <p class="muted" id="about"></p>
+    </div>
+  </div>
+</section>
+</main>
+
+<!-- ============================ DEVICE DRAWER ============================ -->
+<aside id="drawer" class="drawer" hidden>
+  <button class="close" id="drawer-close" title="close">×</button>
+  <div id="drawer-body"></div>
+</aside>
+<div id="toast" class="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

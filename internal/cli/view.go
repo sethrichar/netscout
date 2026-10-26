@@ -15,18 +15,21 @@ func renderTable(rt *rtime, started time.Time, recent []model.Event, width int) 
 	devs := rt.engine.Devices()
 	total, online := rt.engine.Counts()
 
+	rt.mu.Lock()
+	iface, session, passive, hint := rt.iface, rt.session, rt.passive, rt.hint
+	rt.mu.Unlock()
 	mode := term.Green("capturing")
-	if rt.passive {
+	if passive {
 		mode = term.Yellow("PASSIVE (ARP table only)")
 	}
-	label := rt.iface.Label()
-	if label != rt.iface.Name {
-		label = fmt.Sprintf("%s (%s)", rt.iface.Name, label)
+	label := iface.Label()
+	if label != iface.Name {
+		label = fmt.Sprintf("%s (%s)", iface.Name, label)
 	}
-	fmt.Fprintf(&b, "%s  %s on %s  %s\n", term.Bold("netscout"), mode, term.Cyan(label), strings.Join(rt.iface.IPv4, ","))
+	fmt.Fprintf(&b, "%s  %s on %s  %s\n", term.Bold("netscout"), mode, term.Cyan(label), strings.Join(iface.IPv4, ","))
 	stats := ""
-	if rt.session != nil {
-		s := rt.session.Stats()
+	if session != nil {
+		s := session.Stats()
 		stats = fmt.Sprintf("pkts %d", s.Received)
 		if s.PcapDropped+s.QueueDropped > 0 {
 			stats += fmt.Sprintf(" (dropped %d)", s.PcapDropped+s.QueueDropped)
@@ -36,8 +39,8 @@ func renderTable(rt *rtime, started time.Time, recent []model.Event, width int) 
 		time.Now().Format("15:04:05"), total, term.Green(fmt.Sprint(online)), stats,
 		time.Since(started).Round(time.Second), term.Dim("Ctrl-C to stop"))
 
-	if rt.passive && rt.hint != "" {
-		fmt.Fprintln(&b, term.Yellow(rt.hint))
+	if passive && hint != "" {
+		fmt.Fprintln(&b, term.Yellow(hint))
 		fmt.Fprintln(&b)
 	}
 
