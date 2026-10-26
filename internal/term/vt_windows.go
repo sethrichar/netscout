@@ -7,14 +7,14 @@ import "golang.org/x/sys/windows"
 // EnableVT turns on ANSI escape processing in the Windows console so the live
 // table and colours render. Harmless if it fails (older consoles).
 func EnableVT() {
-	for _, h := range []windows.Handle{windows.Stdout, windows.Stderr} {
-		var mode uint32
-		std, err := windows.GetStdHandle(h)
+	for _, id := range []uint32{windows.STD_OUTPUT_HANDLE, windows.STD_ERROR_HANDLE} {
+		h, err := windows.GetStdHandle(id)
 		if err != nil {
 			continue
 		}
-		if windows.GetConsoleMode(std, &mode) == nil {
-			_ = windows.SetConsoleMode(std, mode|windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+		var mode uint32
+		if windows.GetConsoleMode(h, &mode) == nil {
+			_ = windows.SetConsoleMode(h, mode|windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING)
 		}
 	}
 }

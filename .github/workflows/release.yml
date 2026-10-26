@@ -1,0 +1,120 @@
+name: release
+
+# Publishes binaries when a tag is pushed:
+#   v0.x  → GitHub pre-release (working revision)
+#   v1, v2… → GitHub release
+# macOS must be built on macOS (cgo + libpcap); Windows cross-compiles from
+# Linux with CGO disabled because gopacket loads Npcap's wpcap.dll at runtime.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: build macOS universal
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build arm64 + amd64 and lipo
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "$VERSION" > VERSION
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/netscout-arm64 ./cmd/netscout
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/netscout-amd64 ./cmd/netscout
+          lipo -create -output dist/netscout dist/netscout-arm64 dist/netscout-amd64
+          lipo -info dist/netscout
+          ./dist/netscout version
+          mkdir -p pkg/netscout-macos
+          cp dist/netscout README.md CHANGELOG.md pkg/netscout-macos/
+          cp docs/INSTALL-macOS.md pkg/netscout-macos/INSTALL.md
+          (cd pkg && zip -r "../netscout-${GITHUB_REF_NAME}-macos-universal.zip" netscout-macos)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: netscout-*-macos-universal.zip
+
+  windows:
+    name: build Windows amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Cross-compile
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "$VERSION" > VERSION
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/netscout.exe ./cmd/netscout
+          mkdir -p pkg/netscout-windows
+          cp dist/netscout.exe README.md CHANGELOG.md pkg/netscout-windows/
+          cp docs/INSTALL-Windows.md pkg/netscout-windows/INSTALL.md
+          (cd pkg && zip -r "../netscout-${GITHUB_REF_NAME}-windows-amd64.zip" netscout-windows)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: netscout-*-windows-amd64.zip
+
+  linux:
+    name: build Linux amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+      - name: Build
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "$VERSION" > VERSION
+          CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o dist/netscout ./cmd/netscout
+          mkdir -p pkg/netscout-linux
+          cp dist/netscout README.md CHANGELOG.md pkg/netscout-linux/
+          (cd pkg && tar czf "../netscout-${GITHUB_REF_NAME}-linux-amd64.tar.gz" netscout-linux)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: netscout-*-linux-amd64.tar.gz
+
+  release:
+    name: publish GitHub release
+    needs: [macos, windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Release notes from CHANGELOG
+        id: notes
+        run: |
+          set -euo pipefail
+          # Extract the section for this tag ("## v0.6 — …" up to the next "## ").
+          awk -v tag="${GITHUB_REF_NAME}" '
+            /^## / { if (found) exit; if (index($0, "## " tag " ") == 1 || $0 == "## " tag) { found=1; print; next } }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "Release ${GITHUB_REF_NAME}" > notes.md; fi
+          cat notes.md
+          if [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+$ ]]; then echo "prerelease=false" >> "$GITHUB_OUTPUT"; else echo "prerelease=true" >> "$GITHUB_OUTPUT"; fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: netscout ${{ github.ref_name }}
+          body_path: notes.md
+          prerelease: ${{ steps.notes.outputs.prerelease }}
+          files: artifacts/*

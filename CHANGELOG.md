@@ -3,6 +3,26 @@
 All notable changes to netscout. Working revisions are `0.x`; published
 releases are whole numbers. Versions are never removed — only revised up.
 
+## v0.7 — Phase 6 (prep): packaging + release
+
+- Release workflow on tag push: macOS universal binary (arm64 + amd64 via
+  `lipo`, built on macOS), Windows amd64 `.exe` (cross-compiled, no cgo),
+  Linux amd64; each zipped with README, CHANGELOG and a platform INSTALL
+  guide; GitHub release created with notes extracted from this changelog.
+  `v0.x` tags publish as pre-releases, whole-number tags as releases.
+- `netscout doctor` — first-run checklist: data dir, vendor DB, usable
+  interfaces, and a real capture-open test with the platform-specific fix
+  printed on failure.
+- `docs/INSTALL-macOS.md` (quarantine flag, sudo vs ChmodBPF) and
+  `docs/INSTALL-Windows.md` (Npcap, SmartScreen). Npcap is deliberately not
+  bundled.
+- README rewritten as user documentation; CLAUDE.md updated.
+- Fixed the Windows console VT helper (wrong handle type broke the Windows
+  build since v0.2); CI now vets the Windows cross-compile on Linux too.
+
+Still to do before tagging `v1`: run the release build on a real macOS and
+Windows machine and confirm a fresh install sees devices within two minutes.
+
 ## v0.6 — Phase 5: local web UI
 
 - `netscout ui` (also the default when the binary is run with no arguments,

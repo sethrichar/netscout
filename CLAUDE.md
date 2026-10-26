@@ -12,8 +12,16 @@ go test ./...                        # unit tests (no root needed)
 go vet ./...
 go run ./cmd/netscout ifaces         # list interfaces, default marked *
 sudo go run ./cmd/netscout sniff -i en0   # live capture (needs BPF/Npcap)
+sudo go run ./cmd/netscout ui --no-open -p 8765   # web UI at 127.0.0.1:8765
 go run ./cmd/netscout lookup 00:1d:c1:aa:bb:cc
+go run ./cmd/netscout doctor         # first-run checklist
+go run ./internal/parse/testdata/gen # regenerate pcap fixtures after changing frames
+curl -sSL https://raw.githubusercontent.com/wireshark/wireshark/master/epan/manuf-data.c | go run ./tools/manufconv > assets/oui/manuf
 ```
+
+UI smoke test without a browser: start `ui --no-open -p 8765`, then curl
+`/api/status`, `/api/devices`, `/api/subnets/1/map`. Playwright with the
+pre-installed Chromium can screenshot the tabs.
 
 Linux dev boxes need `libpcap-dev`; macOS has libpcap built in; Windows needs
 Npcap at runtime (no cgo — `wpcap.dll` is loaded dynamically).
@@ -30,6 +38,11 @@ Npcap at runtime (no cgo — `wpcap.dll` is loaded dynamically).
 - `internal/ipam` — pure subnet / address-status logic.
 - `internal/engine` — capture → parse → store glue, conflict detection, event fan-out.
 - `internal/web` — HTTP API + SSE; static UI lives in `web/static` (vanilla JS, no build step).
+- `internal/export` — CSV/JSON export and loose-header plan import.
+- `internal/scan` — ARP sweep via pcap injection, ICMP sweep via x/net/icmp.
+- `internal/arptable` — OS ARP cache reader (passive fallback, startup seed).
+- `tools/manufconv` — converts Wireshark `manuf-data.c` → `assets/oui/manuf`.
+- `.github/workflows/release.yml` — tag push → macOS universal / Windows / Linux archives + GitHub release.
 
 ## Conventions
 

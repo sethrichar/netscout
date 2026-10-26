@@ -28,6 +28,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libpcap-dev
       - name: Vet
         run: go vet ./...
+      - name: Vet Windows cross-compile (catches GOOS-specific breakage early)
+        if: runner.os == 'Linux'
+        run: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./... && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/netscout
       - name: Test
         run: go test ./...
       - name: Build
