@@ -13,6 +13,11 @@ import (
 // LLDP records what a neighbour (usually the switch we are plugged into)
 // says about itself: chassis, port, system name/description and management
 // address. The observation is attributed to the frame's source MAC.
+//
+// The management address is kept as an attribute only, never as an IP↔MAC
+// binding: switches send LLDP from the per-port MAC while the management
+// IP answers ARP from the base/SVI MAC, so binding it here would raise a
+// false conflict on the gateway address every advert interval.
 func LLDP(ctx Context, l *layers.LinkLayerDiscovery, info *layers.LinkLayerDiscoveryInfo) []model.Observation {
 	o := ctx.obs(model.SourceLLDP)
 	o.Extra = map[string]string{}
@@ -35,7 +40,6 @@ func LLDP(ctx Context, l *layers.LinkLayerDiscovery, info *layers.LinkLayerDisco
 		}
 		if ip := mgmtIP(info.MgmtAddress); ip != "" {
 			o.Extra["lldp_mgmt_ip"] = ip
-			o.IP = ip
 		}
 		if caps := lldpCaps(info.SysCapabilities); caps != "" {
 			o.Extra["lldp_caps"] = caps
@@ -71,8 +75,7 @@ func CDP(ctx Context, c *layers.CiscoDiscoveryInfo) []model.Observation {
 	}
 	for _, ip := range append(c.Addresses, c.MgmtAddresses...) {
 		if v4 := ip.To4(); v4 != nil && model.IsUsableIPv4(v4.String()) {
-			o.IP = v4.String()
-			o.Extra["cdp_mgmt_ip"] = v4.String()
+			o.Extra["cdp_mgmt_ip"] = v4.String() // attribute only, same reasoning as LLDP
 			break
 		}
 	}
@@ -89,11 +92,11 @@ func lldpChassis(c layers.LLDPChassisID) string {
 			return model.MACString(net.HardwareAddr(c.ID))
 		}
 	case layers.LLDPChassisIDSubTypeNetworkAddr:
-		if len(c.ID) == 5 && c.ID[0] == 1 {
-			return net.IP(c.ID[1:]).String()
+		if ip := networkAddr(c.ID); ip != "" {
+			return ip
 		}
 	}
-	return cleanString(c.ID)
+	return printableOrHex(c.ID)
 }
 
 func lldpPort(p layers.LLDPPortID) string {
@@ -103,11 +106,34 @@ func lldpPort(p layers.LLDPPortID) string {
 			return model.MACString(net.HardwareAddr(p.ID))
 		}
 	case layers.LLDPPortIDSubtypeNetworkAddr:
-		if len(p.ID) == 5 && p.ID[0] == 1 {
-			return net.IP(p.ID[1:]).String()
+		if ip := networkAddr(p.ID); ip != "" {
+			return ip
 		}
 	}
-	return cleanString(p.ID)
+	return printableOrHex(p.ID)
+}
+
+// networkAddr decodes an IANA address-family prefixed address (1 = IPv4,
+// 2 = IPv6) as used by LLDP network-address subtypes.
+func networkAddr(b []byte) string {
+	switch {
+	case len(b) == 5 && b[0] == 1:
+		return net.IP(b[1:]).String()
+	case len(b) == 17 && b[0] == 2:
+		return net.IP(b[1:]).String()
+	}
+	return ""
+}
+
+// printableOrHex renders an ID as text when it is clean ASCII, else as hex,
+// so binary IDs never turn into replacement-character soup.
+func printableOrHex(b []byte) string {
+	for _, c := range b {
+		if c < 0x20 || c > 0x7e {
+			return fmt.Sprintf("%x", b)
+		}
+	}
+	return cleanString(b)
 }
 
 func mgmtIP(m layers.LLDPMgmtAddress) string {

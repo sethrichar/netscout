@@ -41,7 +41,7 @@
   const agoText = (iso) => { const a = ago(iso); return a === 'now' ? 'just now' : a === 'never' ? 'never' : a + ' ago'; };
   const when = (iso) => (!iso || iso.startsWith('0001')) ? 'never' : new Date(iso).toLocaleString();
   const hhmmss = (iso) => new Date(iso).toLocaleTimeString([], { hour12: false });
-  const ipKey = (ip) => (ip || '').split('.').map((n) => n.padStart(3, '0')).join('.') || '999';
+  const ipKey = (ip) => (ip ? ip.split('.').map((n) => n.padStart(3, '0')).join('.') : '999.999.999.999');
 
   const SERVICE_NAMES = {
     '_netaudio-arc._udp': 'Dante', '_netaudio-chan._udp': 'Dante', '_netaudio-cmc._udp': 'Dante', '_netaudio-dbc._udp': 'Dante',
@@ -141,7 +141,7 @@
       case 'name': return (nameFor(d) || 'zzz').toLowerCase();
       case 'tags': return (d.tags || []).join(',') || 'zzz';
       case 'info': return (infoFor(d) || prettyServices((d.attrs || {}).services).join() || 'zzz').toLowerCase();
-      case 'last_seen': return d.last_seen;
+      case 'last_seen': return Date.parse(d.last_seen) || 0;
       default: return (d.online ? '0' : '1') + ipKey(d.ips[0]);
     }
   };
@@ -209,19 +209,28 @@
   setInterval(() => $$('#devices td[data-ts]').forEach((td) => (td.textContent = ago(td.dataset.ts))), 5000);
 
   // ---------- drawer ---------------------------------------------------------
+  let drawerDirty = false; // unsaved label/tags/notes edits
   const openDrawer = (mac) => {
+    if (state.selectedMAC && state.selectedMAC !== mac && drawerDirty && !confirm('Discard unsaved changes?')) return;
+    drawerDirty = false;
     state.selectedMAC = mac;
     $('#drawer').hidden = false;
     renderDrawer(mac, true);
     renderDevices();
   };
   const closeDrawer = () => {
+    if (drawerDirty && !confirm('Discard unsaved changes?')) return;
+    drawerDirty = false;
     $('#drawer').hidden = true;
     state.selectedMAC = null;
     renderDevices();
   };
   $('#drawer-close').addEventListener('click', closeDrawer);
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || $('#drawer').hidden) return;
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) { e.target.blur(); return; }
+    closeDrawer();
+  });
 
   const renderDrawer = async (mac, full) => {
     const body = $('#drawer-body');
@@ -230,7 +239,7 @@
     catch (e) { body.innerHTML = `<p class="muted">${esc(e.message)}</p>`; return; }
     const d = detail.device, a = d.attrs || {}, v = detail.vendor || {};
     // Preserve in-progress edits when refreshing in the background.
-    if (!full && body.querySelector('input:focus, textarea:focus')) return;
+    if (!full && (drawerDirty || body.querySelector('input:focus, textarea:focus'))) return;
     const facts = Object.keys(a).filter((k) => !['self', 'sources'].includes(k)).sort().map((k) => `<div>${esc(k)}</div><div>${esc(a[k])}</div>`).join('');
     const ipHist = (detail.ips || []).map((ip) => `<li><b>${esc(ip.IP)}</b> ${when(ip.FirstSeen)} → ${ago(ip.LastSeen)} ago</li>`).join('');
     const obs = (detail.observations || []).map((o) => `<li>${hhmmss(o.timestamp)} <b>${esc(o.source)}</b> ${esc(o.ip || '')} ${esc(o.hostname || '')} ${esc(Object.entries(o.extra || {}).map(([k, val]) => k + '=' + val).join(' '))}</li>`).join('');
@@ -264,12 +273,14 @@
       ${ipHist ? `<h3>IP history</h3><ul class="obs">${ipHist}</ul>` : ''}
       ${evs ? `<h3>Events</h3><ul class="obs">${evs}</ul>` : ''}
       ${obs ? `<h3>Recent observations</h3><ul class="obs">${obs}</ul>` : ''}`;
+    ['#d-label', '#d-tags', '#d-notes'].forEach((id) => $(id).addEventListener('input', () => { drawerDirty = true; }));
     $('#d-save').onclick = async () => {
       try {
         await patch('/api/devices/' + encodeURIComponent(mac), {
           label: $('#d-label').value.trim(), notes: $('#d-notes').value,
           tags: $('#d-tags').value.split(/[,;]/).map((t) => t.trim()).filter(Boolean),
         });
+        drawerDirty = false;
         toast('saved');
         loadDevices();
       } catch (e) { toast(e.message, true); }
@@ -282,12 +293,14 @@
       } catch (e) { toast(e.message + ' — add the subnet first', true); }
     };
     const clearBtn = $('#d-clear');
-    if (clearBtn) clearBtn.onclick = async () => { await post('/api/conflicts/clear', { ip: a.conflict_ip }); toast('conflict cleared'); loadDevices(); renderDrawer(mac, true); };
+    if (clearBtn) clearBtn.onclick = async () => {
+      try { await post('/api/conflicts/clear', { ip: a.conflict_ip }); toast('conflict cleared'); loadDevices(); renderDrawer(mac, true); }
+      catch (e) { toast(e.message, true); }
+    };
     $('#d-forget').onclick = async () => {
       if (!confirm(`Forget ${d.mac}? It will reappear if seen again.`)) return;
-      await del('/api/devices/' + encodeURIComponent(mac));
-      closeDrawer();
-      loadDevices();
+      try { await del('/api/devices/' + encodeURIComponent(mac)); drawerDirty = false; closeDrawer(); loadDevices(); }
+      catch (e) { toast(e.message, true); }
     };
   };
 
@@ -313,6 +326,9 @@
   };
   const renderSubnetList = () => {
     $('#subnet-list').innerHTML = state.subnets.map((s) => {
+      if (s.error) {
+        return `<li data-id="${s.id}" class="${s.id === state.subnet ? 'active' : ''}"><span class="cidr">${esc(s.cidr)}</span><span class="sub" style="color:var(--bad)">${esc(s.error)}</span></li>`;
+      }
       const t = s.summary.total || 1;
       const seg = (n, cls) => n ? `<i class="cell ${cls}" style="width:${(100 * n / t).toFixed(1)}%"></i>` : '';
       return `<li data-id="${s.id}" class="${s.id === state.subnet ? 'active' : ''}">
@@ -342,15 +358,33 @@
     } catch (err) { toast(err.message, true); }
   });
 
-  const loadMap = async (id) => {
+  // True while the operator is typing in the address popover or the subnet
+  // edit form; background refreshes must not wipe that out.
+  const addrPopBusy = () => {
+    const pop = $('#addr-pop');
+    return !!pop && (pop.contains(document.activeElement) || !!pop.querySelector('#e-save'));
+  };
+  const loadMap = async (id, background = false) => {
+    if (background && addrPopBusy()) return;
     try {
-      state.map = await api(`/api/subnets/${id}/map`);
+      const m = await api(`/api/subnets/${id}/map`);
+      if (background && addrPopBusy()) return;
+      state.map = m;
       renderMap();
-    } catch (e) { toast(e.message, true); }
+    } catch (e) {
+      const sn = state.subnets.find((x) => x.id === id);
+      $('#subnet-detail').innerHTML = `<div class="panel"><header><h2 class="mono">${esc(sn ? sn.cidr : id)}</h2><span class="spacer"></span><button id="sn-del-err" class="danger">Delete</button></header><p class="muted">${esc(e.message)}</p></div>`;
+      $('#sn-del-err').onclick = async () => {
+        if (!confirm('Delete this subnet?')) return;
+        try { await del('/api/subnets/' + id); state.subnet = null; loadSubnets(); } catch (err) { toast(err.message, true); }
+      };
+    }
   };
   const renderMap = () => {
     const m = state.map;
     if (!m) return;
+    // Keep a popover the operator is working in across re-renders.
+    const keepPop = addrPopBusy() ? $('#addr-pop') : null;
     const sn = m.subnet, sum = m.summary;
     const hosts = m.addresses.filter((a) => !a.network && !a.broadcast);
     const cells = m.addresses.map((a) => {
@@ -409,6 +443,7 @@
           <td>${esc((a.devices || []).map((d) => nameFor(d) || d.vendor || (d.randomized ? 'randomized' : '')).join(' + '))}</td>
           <td class="sub">${esc(a.note || '')}</td></tr>`).join('')}</tbody></table></div>
       </div>`;
+    if (keepPop) $('#addr-pop').replaceWith(keepPop);
     $('#grid').addEventListener('click', (e) => {
       const c = e.target.closest('.cell');
       if (c && !c.classList.contains('edge')) selectAddress(c.dataset.ip);
@@ -426,9 +461,8 @@
     $('#sn-scan').onclick = () => startScan(sn.cidr);
     $('#sn-del').onclick = async () => {
       if (!confirm(`Delete ${sn.cidr} and its reservations?`)) return;
-      await del('/api/subnets/' + sn.id);
-      state.subnet = null;
-      loadSubnets();
+      try { await del('/api/subnets/' + sn.id); state.subnet = null; loadSubnets(); }
+      catch (e) { toast(e.message, true); }
     };
     $('#sn-edit').onclick = () => {
       $('#addr-pop').innerHTML = `<div class="popover"><h3>Edit subnet</h3><div class="row">
@@ -445,7 +479,7 @@
         } catch (e) { toast(e.message, true); }
       };
     };
-    if (state.selectedIP) renderAddressPop(state.selectedIP);
+    if (state.selectedIP && !keepPop) renderAddressPop(state.selectedIP);
   };
 
   const selectAddress = (ip) => {
@@ -464,6 +498,7 @@
       <h3 class="mono" style="text-transform:none;font-size:15px;color:var(--text)">${esc(ip)} <span class="status ${a.status}">${a.status}</span>${a.gateway ? ' <span class="sub">gateway</span>' : ''}</h3>
       ${a.note ? `<p class="muted" style="margin:4px 0 8px">${esc(a.note)}</p>` : ''}
       ${devices || '<p class="muted">nothing seen at this address</p>'}
+      ${a.last_known && a.last_known.length ? `<p class="sub">last known address of (offline): ${esc(a.last_known.join(', '))}</p>` : ''}
       ${a.history && a.history.length ? `<p class="sub">previously: ${esc(a.history.join(', '))}</p>` : ''}
       <h3>${r ? 'Reservation' : 'Reserve this address'}</h3>
       <div class="row">
@@ -483,7 +518,10 @@
       } catch (e) { toast(e.message, true); }
     };
     const rd = $('#r-del');
-    if (rd) rd.onclick = async () => { await del('/api/reservations/' + r.id); toast('reservation removed'); loadSubnets(); };
+    if (rd) rd.onclick = async () => {
+      try { await del('/api/reservations/' + r.id); toast('reservation removed'); loadSubnets(); }
+      catch (e) { toast(e.message, true); }
+    };
   };
 
   // ---------- events ---------------------------------------------------------
@@ -499,13 +537,16 @@
     <span>${esc(e.message)}${e.mac ? ` <a href="#" data-mac="${esc(e.mac)}" class="sub mono">${esc(e.mac)}</a>` : ''}</span>
     <span>${e.kind === 'conflict' ? `<button data-clear="${esc(e.ip)}">clear</button>` : ''}</span></li>`;
   const renderEvents = () => {
-    $('#event-list').innerHTML = state.events.map(eventRow).join('') || '<li><span></span><span></span><span class="muted">no events yet</span><span></span></li>';
+    $('#event-list').innerHTML = state.events.map(eventRow).join('') || '<li class="placeholder"><span></span><span></span><span class="muted">no events yet</span><span></span></li>';
   };
   $('#event-list').addEventListener('click', async (e) => {
     const a = e.target.closest('a[data-mac]');
     if (a) { e.preventDefault(); openDrawer(a.dataset.mac); return; }
     const b = e.target.closest('button[data-clear]');
-    if (b) { await post('/api/conflicts/clear', { ip: b.dataset.clear }); toast('conflict cleared for ' + b.dataset.clear); loadDevices(); }
+    if (b) {
+      try { await post('/api/conflicts/clear', { ip: b.dataset.clear }); toast('conflict cleared for ' + b.dataset.clear); loadDevices(); }
+      catch (err) { toast(err.message, true); }
+    }
   });
   $('#event-filters').addEventListener('click', (e) => {
     const b = e.target.closest('button');
@@ -539,7 +580,8 @@
     $('#iface-status').textContent = c.passive ? 'passive mode — ' + (c.hint || '').split('\n')[0] : `capturing on ${c.interface.Name} · ${Number(c.received).toLocaleString()} frames${c.dropped ? ` · ${c.dropped} dropped` : ''}`;
     $('#scan-status').textContent = (c.scanning ? 'scan running… ' : '') + (c.last_scan && !c.last_scan.startsWith('0001') ? `last scan ${ago(c.last_scan)} ago` : 'no scan yet') + (c.scan_every ? ` · repeating every ${c.scan_every / 1e9}s` : '');
     if (document.activeElement !== $('#scan-every')) $('#scan-every').value = String(c.scan_every / 1e9 || 0);
-    if (!$('#scan-cidr').value && c.scan_cidr) $('#scan-cidr').value = c.scan_cidr;
+    const cidrField = $('#scan-cidr');
+    if (!cidrField.dataset.touched && !cidrField.value && c.scan_cidr) cidrField.value = c.scan_cidr;
     $('#oui-status').textContent = `${Number(c.oui_entries).toLocaleString()} vendor prefixes · source: ${c.oui_source === 'embedded' ? 'bundled with this build' : 'updated ' + when(c.oui_updated)}`;
     $('#about').innerHTML = `netscout v${esc(c.version)} · running since ${when(c.started_at)}<br>data: <span class="mono">${esc(c.data_dir)}</span><br>devices go offline after ${c.online_window / 6e10} min of silence`;
   };
@@ -553,6 +595,7 @@
     } catch (e) { toast(e.message, true); }
     $('#btn-iface').disabled = false;
   });
+  $('#scan-cidr').addEventListener('input', (e) => { e.target.dataset.touched = '1'; });
   $('#btn-scan2').addEventListener('click', () => startScan($('#scan-cidr').value.trim()));
   $('#scan-every').addEventListener('change', async (e) => {
     try {
@@ -611,11 +654,15 @@
         toast('⚠ ' + ev.message, true);
         if (state.tab !== 'events') bumpConflicts(unseenConflicts + 1);
       }
-      if (ev.kind === 'scan' && ev.details && ev.details.state === 'done' && state.tab === 'subnets') loadSubnets();
+      if (ev.kind === 'scan' && ev.details && ev.details.state === 'done' && state.tab === 'subnets' && !addrPopBusy()) loadSubnets();
       if (state.tab === 'events' && (!state.eventKind || state.eventKind === ev.kind)) {
         state.events.unshift(ev);
         if (state.events.length > 300) state.events.pop();
-        $('#event-list').insertAdjacentHTML('afterbegin', eventRow(ev));
+        const list = $('#event-list');
+        const ph = list.querySelector('li.placeholder');
+        if (ph) ph.remove();
+        list.insertAdjacentHTML('afterbegin', eventRow(ev));
+        while (list.children.length > 300) list.lastElementChild.remove();
       }
     });
     es.onerror = () => {
@@ -635,6 +682,6 @@
     showTab(state.tab);
     connect();
     setInterval(loadDevices, 10000);
-    setInterval(() => { if (state.tab === 'subnets' && state.subnet) loadMap(state.subnet); }, 15000);
+    setInterval(() => { if (state.tab === 'subnets' && state.subnet) loadMap(state.subnet, true); }, 15000);
   })();
 })();

@@ -13,6 +13,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/sethrichar/netscout/internal/config"
 	"github.com/sethrichar/netscout/internal/model"
 )
 
@@ -28,7 +29,11 @@ func Open(path string) (*Store, error) {
 	if path == ":memory:" {
 		dsn = "file::memory:?cache=shared"
 	} else {
-		dsn = "file:" + path + "?" + url.Values{
+		// SQLite parses file: URIs, so characters with URI meaning in the path
+		// (%, ?, #) must be escaped; slashes and backslashes stay as they are
+		// so Windows paths keep working.
+		escaped := strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23").Replace(path)
+		dsn = "file:" + escaped + "?" + url.Values{
 			"_pragma": {"journal_mode(WAL)", "busy_timeout(5000)", "foreign_keys(1)", "synchronous(NORMAL)"},
 		}.Encode()
 	}
@@ -43,6 +48,9 @@ func Open(path string) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
+	}
+	if path != ":memory:" {
+		config.FixOwnershipOfDBFiles(path)
 	}
 	return s, nil
 }
@@ -80,7 +88,9 @@ func (s *Store) migrate() error {
 
 // --- time / json helpers -----------------------------------------------------
 
-const tsLayout = time.RFC3339Nano
+// tsLayout is fixed-width so string comparison in SQL (MIN/MAX/ORDER BY)
+// matches chronological order; RFC3339Nano trims trailing zeros and does not.
+const tsLayout = "2006-01-02T15:04:05.000000000Z07:00"
 
 func fmtTime(t time.Time) string {
 	if t.IsZero() {
@@ -93,7 +103,7 @@ func parseTime(s string) time.Time {
 	if s == "" {
 		return time.Time{}
 	}
-	t, err := time.Parse(tsLayout, s)
+	t, err := time.Parse(time.RFC3339Nano, s) // accepts the fixed-width layout too
 	if err != nil {
 		return time.Time{}
 	}
@@ -195,6 +205,11 @@ ON CONFLICT(mac, ip) DO UPDATE SET
 				d.MAC, ip.IP, fmtTime(ip.FirstSeen), fmtTime(ip.LastSeen)); err != nil {
 				return fmt.Errorf("upserting ip %s for %s: %w", ip.IP, d.MAC, err)
 			}
+		}
+		// Attrs are replaced as a set so keys removed in memory (cleared
+		// conflicts, a previous "self" marker) disappear from disk too.
+		if _, err := tx.Exec(`DELETE FROM device_attrs WHERE mac = ?`, d.MAC); err != nil {
+			return fmt.Errorf("clearing attrs for %s: %w", d.MAC, err)
 		}
 		now := fmtTime(time.Now())
 		for k, v := range d.Attrs {

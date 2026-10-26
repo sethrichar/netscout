@@ -14,11 +14,17 @@ import (
 // AddSubnet inserts a subnet and returns it with its ID. The CIDR is
 // normalised to its network address.
 func (s *Store) AddSubnet(sn model.Subnet) (model.Subnet, error) {
-	_, n, err := net.ParseCIDR(sn.CIDR)
+	n, err := ValidateSubnetCIDR(sn.CIDR)
 	if err != nil {
-		return sn, fmt.Errorf("invalid CIDR %q: %w", sn.CIDR, err)
+		return sn, err
 	}
 	sn.CIDR = n.String()
+	if sn.Gateway != "" {
+		gw := net.ParseIP(sn.Gateway)
+		if gw == nil || gw.To4() == nil || !n.Contains(gw) {
+			return sn, fmt.Errorf("gateway %q is not an IPv4 address inside %s", sn.Gateway, n)
+		}
+	}
 	res, err := s.db.Exec(`INSERT INTO subnets (cidr, name, vlan, gateway, notes) VALUES (?, ?, ?, ?, ?)`,
 		sn.CIDR, sn.Name, sn.VLAN, sn.Gateway, sn.Notes)
 	if err != nil {
@@ -26,6 +32,22 @@ func (s *Store) AddSubnet(sn model.Subnet) (model.Subnet, error) {
 	}
 	sn.ID, _ = res.LastInsertId()
 	return sn, nil
+}
+
+// ValidateSubnetCIDR accepts IPv4 networks no larger than /16 — the limit the
+// address map and the sweeps can handle.
+func ValidateSubnetCIDR(cidr string) (*net.IPNet, error) {
+	_, n, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid CIDR %q: %w", cidr, err)
+	}
+	if n.IP.To4() == nil {
+		return nil, fmt.Errorf("%q: only IPv4 subnets are supported", cidr)
+	}
+	if ones, bits := n.Mask.Size(); bits-ones > model.MaxSubnetHostBits {
+		return nil, fmt.Errorf("%q is larger than /%d; register smaller subnets", cidr, 32-model.MaxSubnetHostBits)
+	}
+	return n, nil
 }
 
 // UpdateSubnet rewrites name/vlan/gateway/notes for an existing subnet.
@@ -133,10 +155,22 @@ func (s *Store) UpsertReservation(r model.Reservation) (model.Reservation, error
 		}
 		r.MAC = mac
 	}
-	if ip := net.ParseIP(r.IP); ip == nil || ip.To4() == nil {
+	ip := net.ParseIP(r.IP)
+	if ip == nil || ip.To4() == nil {
 		return r, fmt.Errorf("invalid IPv4 address %q", r.IP)
 	}
-	_, err := s.db.Exec(`
+	r.IP = ip.To4().String()
+	sn, err := s.GetSubnet(r.SubnetID)
+	if err != nil {
+		return r, err
+	}
+	if sn == nil {
+		return r, fmt.Errorf("subnet %d not found", r.SubnetID)
+	}
+	if _, n, err := net.ParseCIDR(sn.CIDR); err == nil && !n.Contains(ip) {
+		return r, fmt.Errorf("%s is not inside %s", r.IP, sn.CIDR)
+	}
+	_, err = s.db.Exec(`
 INSERT INTO reservations (subnet_id, ip, mac, label, notes) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(subnet_id, ip) DO UPDATE SET mac = excluded.mac, label = excluded.label, notes = excluded.notes`,
 		r.SubnetID, r.IP, r.MAC, r.Label, r.Notes)

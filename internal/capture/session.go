@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -27,7 +28,13 @@ type Session struct {
 	linkType layers.LinkType
 	received atomic.Uint64
 	dropped  atomic.Uint64
+	closed   atomic.Bool
+	errMu    sync.Mutex
+	err      error // terminal read error, if the capture died on its own
 }
+
+// ErrClosed is returned by Inject once the session has been closed.
+var ErrClosed = errors.New("capture session is closed")
 
 // Open starts a live capture. Errors are wrapped so PrivilegeHint can explain
 // permission problems.
@@ -83,13 +90,22 @@ func (s *Session) Packets(ctx context.Context) <-chan gopacket.Packet {
 			if ctx.Err() != nil {
 				return
 			}
+			if s.closed.Load() {
+				return
+			}
 			data, ci, err := s.handle.ReadPacketData()
 			switch {
 			case err == nil:
 			case errors.Is(err, pcap.NextErrorTimeoutExpired):
 				continue
 			default:
-				// EOF (offline) or a fatal handle error.
+				// EOF (offline) or a fatal handle error: remember it so the
+				// caller can tell the operator instead of showing a dead capture.
+				if !s.closed.Load() && ctx.Err() == nil {
+					s.errMu.Lock()
+					s.err = err
+					s.errMu.Unlock()
+				}
 				return
 			}
 			s.received.Add(1)
@@ -110,8 +126,18 @@ func (s *Session) Packets(ctx context.Context) <-chan gopacket.Packet {
 	return out
 }
 
+// Err reports the error that ended the capture, or nil.
+func (s *Session) Err() error {
+	s.errMu.Lock()
+	defer s.errMu.Unlock()
+	return s.err
+}
+
 // Inject writes a raw frame to the interface (used by the ARP sweep).
 func (s *Session) Inject(frame []byte) error {
+	if s.closed.Load() {
+		return ErrClosed
+	}
 	if err := s.handle.WritePacketData(frame); err != nil {
 		return fmt.Errorf("injecting frame: %w", err)
 	}
@@ -126,6 +152,9 @@ type Stats struct {
 // Stats returns live counters.
 func (s *Session) Stats() Stats {
 	st := Stats{Received: s.received.Load(), QueueDropped: s.dropped.Load()}
+	if s.closed.Load() {
+		return st
+	}
 	if ps, err := s.handle.Stats(); err == nil && ps != nil {
 		st.PcapDropped = uint64(ps.PacketsDropped)
 		st.IfDropped = uint64(ps.PacketsIfDropped)
@@ -133,8 +162,12 @@ func (s *Session) Stats() Stats {
 	return st
 }
 
-// Close releases the pcap handle.
+// Close releases the pcap handle. Safe to call more than once; Inject and
+// Stats become no-ops afterwards instead of touching a freed handle.
 func (s *Session) Close() {
+	if s.closed.Swap(true) {
+		return
+	}
 	if s.handle != nil {
 		s.handle.Close()
 	}

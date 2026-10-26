@@ -31,6 +31,15 @@ func TestParseWindows(t *testing.T) {
 	}
 }
 
+func TestParseWindowsLocalized(t *testing.T) {
+	// German Windows: "Schnittstelle:" header, "dynamisch" type.
+	in := "\r\nSchnittstelle: 10.0.0.15 --- 0x7\r\n  Internetadresse       Physische Adresse     Typ\r\n  10.0.0.1              00-11-22-33-44-55     dynamisch\r\n  10.0.0.255            ff-ff-ff-ff-ff-ff     statisch\r\n"
+	got := parseWindowsARP(in)
+	if len(got) != 2 || got[0].Iface != "10.0.0.15" || got[0].MAC != "00-11-22-33-44-55" {
+		t.Fatalf("localized parse: %+v", got)
+	}
+}
+
 func TestParseIPNeigh(t *testing.T) {
 	in := `192.168.1.1 dev eth0 lladdr 00:11:22:33:44:55 REACHABLE
 192.168.1.7 dev eth0  FAILED

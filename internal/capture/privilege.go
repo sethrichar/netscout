@@ -3,6 +3,7 @@ package capture
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"runtime"
 	"strings"
@@ -38,12 +39,12 @@ Passive mode (ARP table only) is used until capture works.`)
 		if errors.Is(err, errNpcapMissing()) || strings.Contains(msg, "wpcap") || strings.Contains(msg, "npcap") {
 			return strings.TrimSpace(`
 Npcap is required for packet capture on Windows and was not found.
-  Download: https://npcap.com/#download  (install with "WinPcap API-compatible mode" checked)
-  Then re-run netscout. Running as Administrator is not required once Npcap is installed
-  unless you unchecked "Restrict Npcap driver's access to Administrators only".`)
+  Download: https://npcap.com/#download and run the installer with its defaults.
+  Then re-run netscout. Running as Administrator is not required once Npcap is installed,
+  as long as you leave "Restrict Npcap driver's access to Administrators only" unchecked.`)
 		}
 		if permission {
-			return "Capture was denied. Re-run netscout from an Administrator terminal, or reinstall Npcap without the\n\"Restrict Npcap driver's access to Administrators only\" option."
+			return "Capture was denied. Re-run netscout from an Administrator terminal, or reinstall Npcap with\n\"Restrict Npcap driver's access to Administrators only\" unchecked."
 		}
 		return ""
 	default:
@@ -54,16 +55,41 @@ Npcap is required for packet capture on Windows and was not found.
 	}
 }
 
-// bpfBlocked reports whether the current user lacks read access to the first
-// BPF device on macOS. Always false elsewhere.
+// bpfBlocked reports whether the current user lacks read access to the BPF
+// devices on macOS. A device that is merely busy (Wireshark or another
+// netscout holds it) counts as accessible. Always false elsewhere.
 func bpfBlocked() bool {
 	if runtime.GOOS != "darwin" {
 		return false
 	}
-	f, err := os.OpenFile("/dev/bpf0", os.O_RDONLY, 0)
-	if err != nil {
+	for n := 0; n < 4; n++ {
+		f, err := os.OpenFile(fmt.Sprintf("/dev/bpf%d", n), os.O_RDONLY, 0)
+		if err == nil {
+			f.Close()
+			return false
+		}
+		if errors.Is(err, fs.ErrPermission) {
+			return true
+		}
+		// EBUSY / ENOENT etc.: try the next device.
+	}
+	return false
+}
+
+// IsPermissionError reports whether err looks like a capture-permission or
+// missing-driver problem, i.e. one PrivilegeHint can explain.
+func IsPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errNpcapMissing()) {
 		return true
 	}
-	f.Close()
+	msg := strings.ToLower(err.Error())
+	for _, needle := range []string{"permission denied", "operation not permitted", "don't have permission", "/dev/bpf", "access is denied", "npcap", "wpcap", "cap_net_raw"} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
 	return false
 }

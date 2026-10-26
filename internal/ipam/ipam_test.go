@@ -28,7 +28,11 @@ func TestComputeStatuses(t *testing.T) {
 		{IP: "10.0.0.7", MAC: "bb:bb:bb:00:00:07", LastSeen: now, Current: true},
 		{IP: "10.0.0.8", MAC: "cc:cc:cc:00:00:08", LastSeen: now, Current: true},                        // plain in-use
 		{IP: "10.0.0.10", MAC: "dd:dd:dd:00:00:10", LastSeen: now.Add(-48 * time.Hour), Current: false}, // history only
-		{IP: "192.168.1.5", MAC: "ee:ee:ee:00:00:05", LastSeen: now, Current: true},                     // other subnet, ignored
+		{IP: "10.0.0.11", MAC: "ee:ee:ee:00:00:11", LastSeen: now.Add(-3 * time.Hour), LastKnown: true}, // offline device's last address: not in use
+		// DHCP reuse: the old lease holder was last seen an hour ago, the new one now → in-use, not conflict
+		{IP: "10.0.0.12", MAC: "01:01:01:00:00:12", LastSeen: now.Add(-time.Hour), Current: true},
+		{IP: "10.0.0.12", MAC: "02:02:02:00:00:12", LastSeen: now, Current: true},
+		{IP: "192.168.1.5", MAC: "ee:ee:ee:00:00:05", LastSeen: now, Current: true}, // other subnet, ignored
 	}
 	devs := []model.Device{
 		{MAC: "00:1d:c1:00:00:02", Online: true, Hostname: "CL5"},
@@ -57,6 +61,7 @@ func TestComputeStatuses(t *testing.T) {
 		"10.0.0.9":  StatusMismatch, // the wireless rack's MAC is reserved for .5
 		"10.0.0.10": StatusFree,
 		"10.0.0.11": StatusFree,
+		"10.0.0.12": StatusInUse,
 		"10.0.0.14": StatusFree,
 	}
 	for ip, st := range want {
@@ -76,7 +81,13 @@ func TestComputeStatuses(t *testing.T) {
 	if h := byIP["10.0.0.10"].History; len(h) != 1 || h[0] != "dd:dd:dd:00:00:10" {
 		t.Errorf("history: %v", h)
 	}
-	if sum.Total != 14 || sum.Match != 2 || sum.Mismatch != 3 || sum.Conflict != 1 || sum.InUse != 2 || sum.Reserved != 1 || sum.Free != 5 {
+	if lk := byIP["10.0.0.11"].LastKnown; len(lk) != 1 || lk[0] != "ee:ee:ee:00:00:11" {
+		t.Errorf("last known: %v", lk)
+	}
+	if a := byIP["10.0.0.12"]; len(a.MACs) != 1 || a.MACs[0] != "02:02:02:00:00:12" || len(a.History) != 1 {
+		t.Errorf("lease change should keep only the newest claimant: %+v", a)
+	}
+	if sum.Total != 14 || sum.Match != 2 || sum.Mismatch != 3 || sum.Conflict != 1 || sum.InUse != 3 || sum.Reserved != 1 || sum.Free != 4 {
 		t.Errorf("summary: %+v", sum)
 	}
 	if sum.Online != 2 {
@@ -86,7 +97,7 @@ func TestComputeStatuses(t *testing.T) {
 	if got := NextFree(addrs, ""); got != "10.0.0.10" {
 		t.Errorf("NextFree = %s", got)
 	}
-	if got := NextFree(addrs, "10.0.0.11"); got != "10.0.0.12" {
+	if got := NextFree(addrs, "10.0.0.11"); got != "10.0.0.13" {
 		t.Errorf("NextFree after .11 = %s", got)
 	}
 	if f := Filter(addrs, StatusMismatch, StatusConflict); len(f) != 4 {
@@ -101,15 +112,16 @@ func TestComputeStatuses(t *testing.T) {
 
 func TestMarkCurrent(t *testing.T) {
 	b := MarkCurrent([]Binding{
-		{IP: "10.0.0.5", MAC: "aa", LastSeen: now.Add(-3 * time.Hour)}, // old but most recent for aa → current
+		{IP: "10.0.0.5", MAC: "aa", LastSeen: now.Add(-3 * time.Hour)}, // old but most recent for aa → last known, not current
 		{IP: "10.0.0.6", MAC: "aa", LastSeen: now.Add(-5 * time.Hour)}, // older → history
 		{IP: "10.0.0.7", MAC: "bb", LastSeen: now.Add(-10 * time.Minute)},
 		{IP: "10.0.0.8", MAC: "bb", LastSeen: now.Add(-20 * time.Minute)}, // inside window → still current
 	}, now, time.Hour)
-	want := []bool{true, false, true, true}
-	for i, w := range want {
-		if b[i].Current != w {
-			t.Errorf("binding %d current = %v, want %v", i, b[i].Current, w)
+	wantCur := []bool{false, false, true, true}
+	wantLK := []bool{true, false, false, false}
+	for i := range wantCur {
+		if b[i].Current != wantCur[i] || b[i].LastKnown != wantLK[i] {
+			t.Errorf("binding %d current=%v lastKnown=%v, want %v/%v", i, b[i].Current, b[i].LastKnown, wantCur[i], wantLK[i])
 		}
 	}
 }

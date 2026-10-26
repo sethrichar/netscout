@@ -130,23 +130,23 @@ func parseBSDARP(s string) []Entry {
 //
 //	Internet Address      Physical Address      Type
 //	192.168.1.1           00-11-22-33-44-55     dynamic
-var winRe = regexp.MustCompile(`^\s*(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F]{2}(?:-[0-9a-fA-F]{2}){5})\s+(\w+)`)
+//
+// The adapter header is matched by shape ("<ip> --- 0x<index>") rather than
+// by the word "Interface:" so localized Windows builds parse the same way.
+var (
+	winRe       = regexp.MustCompile(`^\s*(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F]{2}(?:-[0-9a-fA-F]{2}){5})\s+(\S+)`)
+	winHeaderRe = regexp.MustCompile(`(\d+\.\d+\.\d+\.\d+)\s+---\s+0x[0-9a-fA-F]+`)
+)
 
 func parseWindowsARP(s string) []Entry {
 	var out []Entry
 	iface := ""
 	for _, line := range strings.Split(s, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "Interface:") {
-			f := strings.Fields(line)
-			if len(f) >= 2 {
-				iface = f[1]
-			}
+		if m := winHeaderRe.FindStringSubmatch(line); m != nil {
+			iface = m[1]
 			continue
 		}
 		if m := winRe.FindStringSubmatch(line); m != nil {
-			if m[3] == "invalid" {
-				continue
-			}
 			out = append(out, Entry{IP: m[1], MAC: m[2], Iface: iface})
 		}
 	}

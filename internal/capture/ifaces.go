@@ -83,7 +83,9 @@ func ListInterfaces() ([]Interface, error) {
 			ifc.Up = d.Flags&pcapIfUp != 0
 			ifc.Loopback = d.Flags&pcapIfLoopback != 0
 		}
-		if defIP != nil {
+		// Only an Ethernet-like interface (one with a MAC) can be the capture
+		// default: a VPN tunnel may carry the default route but sees no LAN.
+		if defIP != nil && ifc.MAC != "" {
 			for _, c := range ifc.IPv4 {
 				if strings.HasPrefix(c, defIP.String()+"/") {
 					ifc.Default = true
@@ -93,21 +95,64 @@ func ListInterfaces() ([]Interface, error) {
 		out = append(out, ifc)
 	}
 	sort.SliceStable(out, func(a, b int) bool {
-		// default first, then up+addressed, then the rest by name
-		if out[a].Default != out[b].Default {
-			return out[a].Default
-		}
-		ha, hb := len(out[a].IPv4) > 0 && !out[a].Loopback, len(out[b].IPv4) > 0 && !out[b].Loopback
-		if ha != hb {
-			return ha
+		ra, rb := rank(out[a]), rank(out[b])
+		if ra != rb {
+			return ra < rb
 		}
 		return out[a].Name < out[b].Name
 	})
 	return out, nil
 }
 
+// rank orders interfaces by how likely they are to be the show LAN:
+// default route first, then physical up+addressed, then virtual/bridges,
+// then tunnels, then everything else.
+func rank(i Interface) int {
+	switch {
+	case i.Loopback:
+		return 9
+	case i.Default:
+		return 0
+	case i.MAC == "":
+		return 6 // tunnel / point-to-point
+	case len(i.IPv4) == 0 || !i.Up:
+		return 5
+	case IsVirtualName(i.Name) || IsVirtualName(i.FriendlyName) || IsVirtualName(i.Description):
+		return 3
+	case hasLinkLocalOnly(i):
+		return 2
+	default:
+		return 1
+	}
+}
+
+// IsVirtualName flags bridges, VM and container adapters that are rarely the
+// network an operator wants to watch.
+func IsVirtualName(name string) bool {
+	n := strings.ToLower(name)
+	for _, p := range []string{"bridge", "vmnet", "vethernet", "vbox", "virtual", "docker", "utun", "tun", "tap", "awdl", "llw", "hyper-v", "wsl", "vmware", "parallels", "tailscale", "zerotier", "wireguard", "ap1", "anpi"} {
+		if strings.HasPrefix(n, p) || strings.Contains(n, " "+p) || strings.Contains(n, "("+p) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasLinkLocalOnly(i Interface) bool {
+	if len(i.IPv4) == 0 {
+		return false
+	}
+	for _, c := range i.IPv4 {
+		if !strings.HasPrefix(c, "169.254.") {
+			return false
+		}
+	}
+	return true
+}
+
 // DefaultInterface returns the interface carrying the default route, or the
-// first non-loopback interface with an IPv4 address.
+// best-ranked physical interface with an IPv4 address (isolated show LANs
+// often have no default route at all).
 func DefaultInterface() (Interface, error) {
 	ifaces, err := ListInterfaces()
 	if err != nil {
@@ -119,11 +164,21 @@ func DefaultInterface() (Interface, error) {
 		}
 	}
 	for _, i := range ifaces {
+		if !i.Loopback && len(i.IPv4) > 0 && i.MAC != "" {
+			return i, nil
+		}
+	}
+	for _, i := range ifaces {
 		if !i.Loopback && len(i.IPv4) > 0 {
 			return i, nil
 		}
 	}
 	return Interface{}, fmt.Errorf("no usable network interface found")
+}
+
+// Usable reports whether the interface can realistically see a LAN right now.
+func (i Interface) Usable() bool {
+	return !i.Loopback && i.Up && len(i.IPv4) > 0 && i.MAC != ""
 }
 
 // FindInterface resolves a user-supplied name against pcap names, OS names and

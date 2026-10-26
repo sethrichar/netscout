@@ -117,7 +117,7 @@ var subnetListCmd = &cobra.Command{
 			res, _ := st.ListReservations(sn.ID)
 			_, sum, err := ipam.Compute(sn, res, bindings, devs, ipam.Options{})
 			if err != nil {
-				return err
+				fmt.Fprintf(os.Stderr, "warning: subnet #%d %s: %v\n", sn.ID, sn.CIDR, err)
 			}
 			rows = append(rows, row{sn, sum})
 		}

@@ -163,7 +163,9 @@ func TestLLDPFixture(t *testing.T) {
 	if o.Extra["lldp_sysdesc"] != "Cisco IOS Software, C2960X" {
 		t.Errorf("sysdesc should be first line: %q", o.Extra["lldp_sysdesc"])
 	}
-	if o.IP != "10.0.0.1" || o.Extra["lldp_mgmt_ip"] != "10.0.0.1" {
+	// The management IP is an attribute only: the port MAC sending LLDP is
+	// not the MAC that answers ARP for it, so binding it would fake conflicts.
+	if o.IP != "" || o.Extra["lldp_mgmt_ip"] != "10.0.0.1" {
 		t.Errorf("mgmt ip: %q %+v", o.IP, o.Extra)
 	}
 	if o.Extra["lldp_caps"] != "bridge" {

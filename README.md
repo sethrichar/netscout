@@ -37,17 +37,20 @@ Prefer the terminal?
 
 ```sh
 sudo netscout sniff -i en0 --scan        # live table, sweep the subnet first
-netscout scan 10.0.0.0/24                # one-off ARP sweep, prints what answered
-netscout lookup 00:1d:c1:12:34:56        # → Audinate Pty L (Dante)
+sudo netscout scan 10.0.0.0/24           # one-off ARP sweep, prints what answered
+netscout lookup 00:1d:c1:12:34:56        # → Audinate Pty L (Dante); no capture needed
 ```
+
+(`sudo` is only needed on macOS without ChmodBPF. Commands that only read the
+database — `devices`, `subnet show`, `export`, `lookup` — never need it.)
 
 ### Requirements
 
 | | |
 |---|---|
-| **macOS** | Capture needs `/dev/bpf*` access: run with `sudo`, or install Wireshark with its **ChmodBPF** component once. Unsigned builds need the quarantine flag removed (`xattr -d com.apple.quarantine netscout`) or right-click → Open. See [docs/INSTALL-macOS.md](docs/INSTALL-macOS.md). |
-| **Windows** | Install [Npcap](https://npcap.com/#download) (WinPcap API-compatible mode). Not bundled. See [docs/INSTALL-Windows.md](docs/INSTALL-Windows.md). |
-| **Linux** | Works too (`sudo` or `setcap cap_net_raw,cap_net_admin=eip netscout`), but isn't a release target. |
+| **macOS** | Capture needs `/dev/bpf*` access. Easiest long-term: install Wireshark once and accept its **ChmodBPF** component, then run `netscout` as yourself. Otherwise prefix every command with `sudo` (netscout hands the data directory back to your user). Unsigned builds need the quarantine flag removed (`xattr -d com.apple.quarantine netscout`) or System Settings → Privacy & Security → **Open Anyway** after the first blocked launch. Details: `docs/INSTALL-macOS.md` (shipped as `INSTALL.md` in the release zip). |
+| **Windows** | Install [Npcap](https://npcap.com/#download) with its default options. Not bundled. Details: `docs/INSTALL-Windows.md` (`INSTALL.md` in the release zip). |
+| **Linux** | A tarball is published and it works (`sudo`, or `setcap cap_net_raw,cap_net_admin=eip netscout`), but Linux is not a tested release target. |
 
 Without capture permission netscout still runs in **passive mode** (OS ARP table
 only) and prints the exact fix.
@@ -133,11 +136,12 @@ Actions.
 
 ## Roadmap
 
-See [PLAN.md](PLAN.md). v2 ideas: SNMP switch polling (MAC → port), Dante
-device-name decoding, show-doc export templates, scheduled diff reports.
+See `PLAN.md` in the repository. v2 ideas: SNMP switch polling (MAC → port),
+Dante device-name decoding, show-doc export templates, scheduled diff reports.
 
 ## License
 
-MIT for netscout. The bundled vendor data is from the
-[Wireshark](https://www.wireshark.org/) project (GPL-2.0-or-later data file,
-redistributed unmodified in text form).
+netscout is MIT licensed (see `LICENSE`). The bundled vendor database is
+derived from the [Wireshark](https://www.wireshark.org/) project's
+GPL-2.0-or-later `manuf-data.c`, converted to text form by `tools/manufconv`;
+see `THIRD_PARTY_NOTICES.md` for details and the other third-party components.

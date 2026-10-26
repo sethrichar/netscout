@@ -20,6 +20,14 @@ const (
 	SourceARPTable = "arptable"
 )
 
+// MaxSubnetHostBits caps subnet size for sweeps and address maps: a /16 is
+// 65k addresses, already more than any show network needs.
+const MaxSubnetHostBits = 16
+
+// ListAttrKeys are device attributes that hold a comma-separated set and are
+// merged as a union across observations instead of replaced.
+var ListAttrKeys = map[string]bool{"services": true, "service_names": true, "lldp_caps": true, "sources": true}
+
 // Event kinds.
 const (
 	EventNewDevice = "new_device"

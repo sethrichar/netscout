@@ -99,6 +99,8 @@ func Apply(st *store.Store, imp *Import, opts ApplyOptions) (Report, error) {
 		}
 	}
 
+	rep.Skipped = append(rep.Skipped, imp.Warnings...)
+	planned := map[string]int{} // "subnetID/ip" → line that planned it
 	for _, row := range imp.Rows {
 		if row.IP == "" {
 			// Label-only row.
@@ -140,6 +142,10 @@ func Apply(st *store.Store, imp *Import, opts ApplyOptions) (Report, error) {
 			}
 			if sn == nil && opts.AutoSubnets {
 				p := net.ParseIP(row.IP).To4()
+				if p == nil {
+					rep.Skipped = append(rep.Skipped, fmt.Sprintf("line %d: %q is not an IPv4 address", row.Line, row.IP))
+					continue
+				}
 				if sn, err = create(model.Subnet{CIDR: fmt.Sprintf("%d.%d.%d.0/24", p[0], p[1], p[2]), VLAN: row.VLAN}); err != nil {
 					return rep, err
 				}
@@ -153,18 +159,34 @@ func Apply(st *store.Store, imp *Import, opts ApplyOptions) (Report, error) {
 			rep.Skipped = append(rep.Skipped, fmt.Sprintf("line %d: %s is outside %s", row.Line, row.IP, sn.CIDR))
 			continue
 		}
+		// The same address planned twice is a plan error worth surfacing,
+		// not something to silently collapse to "last row wins".
+		key := fmt.Sprintf("%d/%s", sn.ID, row.IP)
+		if first, dup := planned[key]; dup {
+			rep.Skipped = append(rep.Skipped, fmt.Sprintf("line %d: %s is already planned on line %d; row skipped", row.Line, row.IP, first))
+			continue
+		}
+		planned[key] = row.Line
+		// Carry the plan's name onto the device itself if it has no label yet
+		// (decided the same way in dry runs so the report matches reality).
+		labelDevice := false
+		if row.MAC != "" && row.Label != "" {
+			if d, _ := st.GetDevice(row.MAC); d == nil || d.Label == "" {
+				labelDevice = true
+			}
+		}
 		if !opts.DryRun {
 			if _, err := st.UpsertReservation(model.Reservation{SubnetID: sn.ID, IP: row.IP, MAC: row.MAC, Label: row.Label, Notes: row.Notes}); err != nil {
 				return rep, fmt.Errorf("line %d: %w", row.Line, err)
 			}
-			// Carry the plan's name onto the device itself if it has no label yet.
-			if row.MAC != "" && row.Label != "" {
-				if d, _ := st.GetDevice(row.MAC); d == nil || d.Label == "" {
-					if err := st.SetUserFields(row.MAC, &row.Label, nil, row.Tags); err == nil {
-						rep.DevicesLabelled++
-					}
+			if labelDevice {
+				if err := st.SetUserFields(row.MAC, &row.Label, nil, row.Tags); err != nil {
+					return rep, fmt.Errorf("line %d: %w", row.Line, err)
 				}
 			}
+		}
+		if labelDevice {
+			rep.DevicesLabelled++
 		}
 		rep.ReservationsWritten++
 	}

@@ -31,23 +31,31 @@ func Packet(pkt gopacket.Packet, iface string) []model.Observation {
 	}
 
 	eth, _ := pkt.Layer(layers.LayerTypeEthernet).(*layers.Ethernet)
-	if eth == nil {
+	switch {
+	case eth != nil:
+		ctx.SrcMAC = model.MACString(eth.SrcMAC)
+		ctx.DstMAC = model.MACString(eth.DstMAC)
+	default:
+		// Linux "any" pseudo-interface (SLL on older libpcap, SLL2 on >= 1.10):
+		// only the source address is available.
 		if sll, ok := pkt.Layer(layers.LayerTypeLinuxSLL).(*layers.LinuxSLL); ok {
-			// Linux "any" pseudo-interface: only the source address is available.
 			ctx.SrcMAC = model.MACString(sll.Addr)
+		} else if sll2, ok := pkt.Layer(layers.LayerTypeLinuxSLL2).(*layers.LinuxSLL2); ok {
+			ctx.SrcMAC = model.MACString(sll2.Addr)
 		} else {
 			return nil
 		}
-	} else {
-		ctx.SrcMAC = model.MACString(eth.SrcMAC)
-		ctx.DstMAC = model.MACString(eth.DstMAC)
 	}
 	if !model.IsUsableMAC(ctx.SrcMAC) {
 		return nil
 	}
 
-	if dq, ok := pkt.Layer(layers.LayerTypeDot1Q).(*layers.Dot1Q); ok {
-		ctx.VLAN = int(dq.VLANIdentifier)
+	// 802.1Q: take the innermost tag so QinQ (802.1ad) frames record the
+	// customer VLAN the device actually lives on, not the provider S-VLAN.
+	for _, l := range pkt.Layers() {
+		if dq, ok := l.(*layers.Dot1Q); ok {
+			ctx.VLAN = int(dq.VLANIdentifier)
+		}
 	}
 	if ip4, ok := pkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4); ok {
 		ctx.SrcIP, ctx.DstIP = ip4.SrcIP, ip4.DstIP

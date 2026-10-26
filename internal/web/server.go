@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -102,6 +103,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	if s.ln == nil {
 		return errors.New("Listen first")
 	}
+	// Requests (including long-lived SSE streams) inherit ctx, so Shutdown
+	// does not have to wait for them.
+	s.srv.BaseContext = func(net.Listener) context.Context { return ctx }
 	errc := make(chan error, 1)
 	go func() { errc <- s.srv.Serve(s.ln) }()
 	select {
@@ -130,14 +134,46 @@ func (s *Server) hostCheck(next http.Handler) http.Handler {
 			host = h
 		}
 		host = strings.Trim(host, "[]")
-		if host != "localhost" && host != "127.0.0.1" && host != "::1" && !strings.HasSuffix(host, ".localhost") {
+		if !isLoopbackHost(host) {
 			http.Error(w, "forbidden host", http.StatusForbidden)
 			return
+		}
+		// CSRF: a page on another site can still make the browser send a
+		// "simple" POST (text/plain or multipart) to 127.0.0.1. Browsers always
+		// attach Sec-Fetch-Site and/or Origin to such requests, so require
+		// them to prove same-origin; requests without either (curl, scripts)
+		// are not browser-initiated cross-site requests.
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "none" {
+				http.Error(w, "cross-site request refused", http.StatusForbidden)
+				return
+			}
+			if origin := r.Header.Get("Origin"); origin != "" && origin != "null" && !isLoopbackOrigin(origin) {
+				http.Error(w, "cross-site request refused", http.StatusForbidden)
+				return
+			}
 		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.ToLower(host)
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isLoopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	return isLoopbackHost(strings.Trim(u.Hostname(), "[]"))
 }
 
 func (s *Server) routes() {
@@ -199,6 +235,11 @@ func writeError(w http.ResponseWriter, status int, err error) {
 
 func readJSON(r *http.Request, v any) error {
 	defer r.Body.Close()
+	// Only real JSON requests are accepted; a forged text/plain body from a
+	// cross-site form never gets this far.
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(strings.ToLower(ct), "application/json") {
+		return fmt.Errorf("Content-Type must be application/json")
+	}
 	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
 	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("invalid JSON body: %w", err)

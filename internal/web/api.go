@@ -171,6 +171,7 @@ func (s *Server) handleClearConflict(w http.ResponseWriter, r *http.Request) {
 type subnetView struct {
 	model.Subnet
 	Summary ipam.Summary `json:"summary"`
+	Error   string       `json:"error,omitempty"`
 }
 
 func (s *Server) bindings() []ipam.Binding {
@@ -179,13 +180,14 @@ func (s *Server) bindings() []ipam.Binding {
 	for i, b := range raw {
 		out[i] = ipam.Binding{IP: b.IP, MAC: b.MAC, LastSeen: b.LastSeen}
 	}
-	window := s.ctl.Status().OnlineAfter
-	if window <= 0 {
-		window = time.Hour
-	}
-	// A binding is current if it is recent, or it is the device's latest.
-	return ipam.MarkCurrent(out, time.Now(), window)
+	// A binding counts as current for an hour after its last sighting; a
+	// device's latest address beyond that is shown as "last known" only.
+	return ipam.MarkCurrent(out, time.Now(), currentWindow)
 }
+
+// currentWindow is how long an observed IP↔MAC binding counts as live for
+// the address map (the CLI uses the same default via --window).
+const currentWindow = time.Hour
 
 func (s *Server) handleSubnets(w http.ResponseWriter, r *http.Request) {
 	subnets, err := s.store.ListSubnets()
@@ -200,10 +202,11 @@ func (s *Server) handleSubnets(w http.ResponseWriter, r *http.Request) {
 		res, _ := s.store.ListReservations(sn.ID)
 		_, sum, err := ipam.Compute(sn, res, bindings, devs, ipam.Options{})
 		if err != nil {
-			writeError(w, 500, err)
-			return
+			// One bad row must not hide the others (or make it undeletable).
+			views = append(views, subnetView{Subnet: sn, Error: err.Error()})
+			continue
 		}
-		views = append(views, subnetView{sn, sum})
+		views = append(views, subnetView{Subnet: sn, Summary: sum})
 	}
 	writeJSON(w, 200, views)
 }
@@ -211,6 +214,10 @@ func (s *Server) handleSubnets(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSubnetCreate(w http.ResponseWriter, r *http.Request) {
 	var sn model.Subnet
 	if err := readJSON(r, &sn); err != nil {
+		writeError(w, 400, err)
+		return
+	}
+	if _, err := store.ValidateSubnetCIDR(sn.CIDR); err != nil {
 		writeError(w, 400, err)
 		return
 	}
@@ -427,13 +434,12 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err)
 		return
 	}
-	// Labels written straight to the store need to reach the engine's memory.
+	// Labels/notes/tags were written straight to the store; pull every
+	// touched MAC back into the engine so the live table agrees with the DB.
 	if !opts.DryRun {
 		for _, row := range imp.Rows {
-			if row.MAC != "" && row.Label != "" {
-				if d, ok := s.eng.Device(row.MAC); ok && d.Label == "" {
-					_ = s.eng.SetUserFields(row.MAC, &row.Label, nil, nil)
-				}
+			if row.MAC != "" {
+				_ = s.eng.ReloadUserFields(row.MAC)
 			}
 		}
 	}

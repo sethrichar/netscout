@@ -6,9 +6,10 @@ netscout uses Npcap for packet capture and does **not** bundle it (Npcap's
 licence doesn't allow redistribution).
 
 1. Download Npcap from <https://npcap.com/#download>.
-2. Run the installer. Keep **"Install Npcap in WinPcap API-compatible Mode"**
-   checked. If you want to run netscout without an Administrator terminal,
-   *uncheck* "Restrict Npcap driver's access to Administrators only".
+2. Run the installer with its default options. Leave **"Restrict Npcap
+   driver's access to Administrators only"** *unchecked* (the default) so
+   netscout works from a normal terminal; if you check it, run netscout from
+   an Administrator terminal instead.
 
 ## 2. Run it
 

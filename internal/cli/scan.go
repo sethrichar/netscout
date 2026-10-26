@@ -45,10 +45,12 @@ Requires capture privileges (sudo on macOS, Npcap on Windows).`,
 		cidr := ""
 		if len(args) == 1 {
 			cidr = args[0]
-		} else if nets := iface.LocalNets(); len(nets) > 0 {
-			cidr = nets[0].String()
-		} else {
+		} else if cidr = scan.DefaultCIDR(iface); cidr == "" {
 			return fmt.Errorf("interface %s has no IPv4 subnet; pass a CIDR", iface.Name)
+		}
+		if hosts, _, err := scan.Hosts(cidr); err == nil && len(hosts) > 4096 {
+			fmt.Fprintf(os.Stderr, "note: %s is %d addresses; at %d/s with %d passes this takes about %s\n",
+				cidr, len(hosts), scanRate, scanPasses, (time.Duration(len(hosts)*scanPasses) * time.Second / time.Duration(scanRate)).Round(time.Second))
 		}
 
 		var observe func(model.Observation)

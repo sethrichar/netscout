@@ -50,6 +50,7 @@ type rtime struct {
 	scanInterval time.Duration
 	scanCIDR     string
 	scanCancel   context.CancelFunc
+	scanDone     chan struct{}
 }
 
 // openStore opens the SQLite DB in the data dir.
@@ -80,8 +81,10 @@ func newRuntime(ifaceName string, onlineWindow, conflictWindow time.Duration, bp
 	rt := &rtime{dataDir: dir, store: st, oui: db, logger: logger, bpf: bpf, started: time.Now()}
 
 	if ifaceName == "" {
+		// Reuse the last interface only if it can still see a LAN; otherwise
+		// fall back to the default-route choice rather than a dead adapter.
 		if last, _ := st.GetMeta("last_interface"); last != "" {
-			if _, err := capture.FindInterface(last); err == nil {
+			if i, err := capture.FindInterface(last); err == nil && i.Usable() {
 				ifaceName = last
 			}
 		}
@@ -116,21 +119,22 @@ func newRuntime(ifaceName string, onlineWindow, conflictWindow time.Duration, bp
 func (rt *rtime) openCapture(name string) error {
 	iface, err := capture.FindInterface(name)
 	if err != nil {
-		hint := capture.PrivilegeHint(err)
-		if hint == "" {
+		// Only a missing driver / no permission degrades to passive mode;
+		// "no such interface" is a plain error the operator must fix.
+		if !capture.IsPermissionError(err) {
 			return err
 		}
-		// Can't even enumerate interfaces (Windows without Npcap).
-		rt.iface, rt.session, rt.passive, rt.hint = capture.Interface{Name: name}, nil, true, hint
+		rt.iface, rt.session, rt.passive = capture.Interface{Name: name}, nil, true
+		rt.hint = fmt.Sprintf("%v\n\n%s", err, capture.PrivilegeHint(err))
 		return nil
 	}
 	sess, err := capture.Open(iface, capture.Options{Promisc: true, BPF: rt.bpf})
 	if err != nil {
-		hint := capture.PrivilegeHint(err)
-		if hint == "" {
+		if !capture.IsPermissionError(err) {
 			return err
 		}
-		rt.iface, rt.session, rt.passive, rt.hint = iface, nil, true, fmt.Sprintf("%v\n\n%s", err, hint)
+		rt.iface, rt.session, rt.passive = iface, nil, true
+		rt.hint = fmt.Sprintf("%v\n\n%s", err, capture.PrivilegeHint(err))
 	} else {
 		rt.iface, rt.session, rt.passive, rt.hint = iface, sess, false, ""
 	}
@@ -159,16 +163,35 @@ func (rt *rtime) start(ctx context.Context) {
 	rt.mu.Unlock()
 }
 
-// stop ends capture and closes the engine (final flush, everything offline).
+// stop ends any sweep and the capture, then closes the engine (final flush,
+// everything offline).
 func (rt *rtime) stop() {
+	rt.stopScan()
 	rt.mu.Lock()
 	cancel, done := rt.capCancel, rt.capDone
+	rt.capCancel, rt.capDone = nil, nil
 	rt.mu.Unlock()
 	if cancel != nil {
 		cancel()
 		<-done
 	}
+	rt.mu.Lock()
+	rt.session = nil
+	rt.mu.Unlock()
 	rt.engine.Close()
+}
+
+// stopScan cancels a running sweep and waits for it to finish injecting.
+func (rt *rtime) stopScan() {
+	rt.scanMu.Lock()
+	cancel, done := rt.scanCancel, rt.scanDone
+	rt.scanMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
 }
 
 // run is the simple synchronous form used by sniff: start, wait, stop.
@@ -197,8 +220,12 @@ func waitStopped(done <-chan struct{}, grace time.Duration) {
 	}
 }
 
-// startCaptureLocked spawns the packet (or passive polling) loop for the
-// current session. rt.mu must be held.
+// startCaptureLocked spawns the packet loop for the current session, or the
+// OS ARP-table poller in passive mode. rt.mu must be held.
+//
+// The OS ARP cache is only consulted in passive mode: its entries can be
+// many minutes stale, so in active mode they would only seed false
+// ownership and phantom offline events.
 func (rt *rtime) startCaptureLocked() {
 	ctx, cancel := context.WithCancel(rt.appCtx)
 	done := make(chan struct{})
@@ -206,8 +233,8 @@ func (rt *rtime) startCaptureLocked() {
 	sess, iface, passive := rt.session, rt.iface, rt.passive
 	go func() {
 		defer close(done)
-		rt.pollARPTable(iface, passive)
 		if sess == nil {
+			rt.pollARPTable(iface, passive)
 			t := time.NewTicker(5 * time.Second)
 			defer t.Stop()
 			for {
@@ -226,11 +253,32 @@ func (rt *rtime) startCaptureLocked() {
 			}
 		}
 		sess.Close()
+		if err := sess.Err(); err != nil && ctx.Err() == nil {
+			// The capture died on its own (cable pulled, adapter removed,
+			// driver reset). Say so loudly and fall back to passive mode so
+			// the UI does not keep claiming "capturing".
+			rt.logger.Printf("capture on %s stopped: %v", iface.Name, err)
+			rt.mu.Lock()
+			if rt.session == sess {
+				rt.session = nil
+				rt.passive = true
+				rt.hint = fmt.Sprintf("capture on %s stopped: %v\n\nReconnect the interface and switch to it again in Settings (or restart netscout).", iface.Name, err)
+			}
+			rt.mu.Unlock()
+			rt.engine.Emit(model.Event{Kind: model.EventInfo, Message: fmt.Sprintf("capture on %s stopped: %v — now passive", iface.Label(), err)})
+		}
 	}()
 }
 
-// switchInterface stops capture, reopens on another interface and restarts.
+// switchInterface stops any sweep and the capture, reopens on another
+// interface and restarts. The target is validated before the current capture
+// is torn down so a typo never leaves the tool dead.
 func (rt *rtime) switchInterface(name string) error {
+	target, err := capture.FindInterface(name)
+	if err != nil && !capture.IsPermissionError(err) {
+		return err
+	}
+	rt.stopScan()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if rt.capCancel != nil {
@@ -238,7 +286,7 @@ func (rt *rtime) switchInterface(name string) error {
 		<-rt.capDone
 	}
 	rt.session = nil // closed by the loop
-	if err := rt.openCapture(name); err != nil {
+	if err := rt.openCapture(target.Name); err != nil {
 		// Reopen the previous interface so we are never left dead.
 		_ = rt.openCapture(rt.iface.Name)
 		rt.startCaptureLocked()
@@ -279,9 +327,8 @@ func (rt *rtime) startScan(ctx context.Context, cidr string) error {
 	if sess == nil {
 		return fmt.Errorf("scan unavailable: capture is in passive mode")
 	}
-	nets := iface.LocalNets()
-	if cidr == "" && len(nets) > 0 {
-		cidr = nets[0].String()
+	if cidr == "" {
+		cidr = scan.DefaultCIDR(iface)
 	}
 	if cidr == "" {
 		return fmt.Errorf("interface has no IPv4 subnet; specify a CIDR")
@@ -296,7 +343,8 @@ func (rt *rtime) startScan(ctx context.Context, cidr string) error {
 	}
 	rt.scanning = true
 	sctx, cancel := context.WithCancel(ctx)
-	rt.scanCancel = cancel
+	done := make(chan struct{})
+	rt.scanCancel, rt.scanDone = cancel, done
 	rt.scanMu.Unlock()
 
 	go func() {
@@ -305,7 +353,9 @@ func (rt *rtime) startScan(ctx context.Context, cidr string) error {
 			rt.scanMu.Lock()
 			rt.scanning = false
 			rt.lastScan = time.Now()
+			rt.scanCancel, rt.scanDone = nil, nil
 			rt.scanMu.Unlock()
+			close(done)
 		}()
 		rt.engine.Emit(model.Event{Kind: model.EventScan, Message: fmt.Sprintf("ARP sweep of %s started", cidr), Details: map[string]string{"cidr": cidr, "state": "started"}})
 		start := time.Now()

@@ -115,6 +115,9 @@ JSON: the output of "netscout export --json" (subnets, reservations, labels).`,
 		if importDry {
 			prefix = "[dry run] "
 		}
+		if imp.DevicesOnly {
+			fmt.Fprintln(os.Stderr, "note: this is a netscout devices export; importing labels/notes/tags only (no reservations)")
+		}
 		fmt.Printf("%s%d rows read: %d reservations written, %d devices labelled", prefix, len(imp.Rows), rep.ReservationsWritten, rep.DevicesLabelled)
 		if len(rep.SubnetsCreated) > 0 {
 			fmt.Printf(", subnets created: %s", strings.Join(rep.SubnetsCreated, " "))

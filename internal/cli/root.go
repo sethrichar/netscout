@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/sethrichar/netscout/internal/config"
+	"github.com/sethrichar/netscout/internal/term"
 )
 
 var (
@@ -21,6 +22,14 @@ var rootCmd = &cobra.Command{
 identifies devices by MAC vendor. Built for show-site / AV / Dante networks.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		// Make ANSI output safe everywhere: enable VT processing on Windows
+		// consoles, and drop colours when output is not a terminal.
+		term.EnableVT()
+		if !term.IsTTY() || os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" {
+			term.DisableColor()
+		}
+	},
 }
 
 // Execute runs the CLI and prints any error to stderr.

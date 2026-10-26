@@ -26,12 +26,15 @@ const (
 )
 
 // Binding is an observed IP↔MAC pair. Current says whether it is believed to
-// be live (recent) rather than history.
+// be live (seen inside the window). LastKnown marks a device's most recent
+// address when that sighting is older than the window: it is where the
+// device was, not a claim on the address now.
 type Binding struct {
-	IP       string
-	MAC      string
-	LastSeen time.Time
-	Current  bool
+	IP        string
+	MAC       string
+	LastSeen  time.Time
+	Current   bool
+	LastKnown bool
 }
 
 // Address is the computed state of one IP.
@@ -46,6 +49,8 @@ type Address struct {
 	Online  bool           `json:"online"`
 	// LastSeen is the newest observation of any current binding.
 	LastSeen time.Time `json:"last_seen,omitempty"`
+	// LastKnown lists offline devices whose most recent address this was.
+	LastKnown []string `json:"last_known,omitempty"`
 	// History lists MACs that used the address before (not current).
 	History  []string `json:"history,omitempty"`
 	Note     string   `json:"note,omitempty"`
@@ -71,11 +76,17 @@ type Summary struct {
 type Options struct {
 	// IncludeEdges keeps the network and broadcast addresses in the output.
 	IncludeEdges bool
+	// ConflictWindow: two current MACs on one address only count as a
+	// conflict when their last sightings are this close together; otherwise
+	// the older one is a previous occupant (a normal DHCP lease change).
+	// Default 2 minutes.
+	ConflictWindow time.Duration
 }
 
-// MarkCurrent decides which bindings are live: anything seen within window, or
-// the single most recent IP of each MAC (so a device that has been offline for
-// a day still shows where it was). Returns the bindings with Current set.
+// MarkCurrent decides which bindings are live: anything seen within window is
+// Current. The single most recent IP of each MAC outside the window is marked
+// LastKnown (so an offline device still shows where it was) but never counts
+// as a live claim on the address. Returns the bindings with flags set.
 func MarkCurrent(bindings []Binding, now time.Time, window time.Duration) []Binding {
 	newest := map[string]time.Time{}
 	for _, b := range bindings {
@@ -85,7 +96,8 @@ func MarkCurrent(bindings []Binding, now time.Time, window time.Duration) []Bind
 	}
 	out := make([]Binding, len(bindings))
 	for i, b := range bindings {
-		b.Current = now.Sub(b.LastSeen) <= window || b.LastSeen.Equal(newest[b.MAC])
+		b.Current = now.Sub(b.LastSeen) <= window
+		b.LastKnown = !b.Current && b.LastSeen.Equal(newest[b.MAC])
 		out[i] = b
 	}
 	return out
@@ -118,19 +130,27 @@ func Compute(sn model.Subnet, reservations []model.Reservation, bindings []Bindi
 			resByMAC[r.MAC] = r
 		}
 	}
+	conflictWindow := opts.ConflictWindow
+	if conflictWindow <= 0 {
+		conflictWindow = 2 * time.Minute
+	}
 	// Bindings inside this subnet, grouped by IP; also where each MAC lives now.
 	curByIP := map[string][]Binding{}
 	histByIP := map[string][]string{}
+	lastKnownByIP := map[string][]string{}
 	macAt := map[string][]string{} // mac → current IPs in this subnet
 	for _, b := range bindings {
 		ip := net.ParseIP(b.IP)
 		if ip == nil || !ipnet.Contains(ip) {
 			continue
 		}
-		if b.Current {
+		switch {
+		case b.Current:
 			curByIP[b.IP] = append(curByIP[b.IP], b)
 			macAt[b.MAC] = append(macAt[b.MAC], b.IP)
-		} else {
+		case b.LastKnown:
+			lastKnownByIP[b.IP] = appendUnique(lastKnownByIP[b.IP], b.MAC)
+		default:
 			histByIP[b.IP] = appendUnique(histByIP[b.IP], b.MAC)
 		}
 	}
@@ -157,7 +177,13 @@ func Compute(sn model.Subnet, reservations []model.Reservation, bindings []Bindi
 
 		cur := curByIP[s]
 		sort.Slice(cur, func(x, y int) bool { return cur[x].LastSeen.After(cur[y].LastSeen) })
-		for _, b := range cur {
+		for i, b := range cur {
+			// Only MACs seen within ConflictWindow of the newest claim are
+			// simultaneous claimants; older ones are previous occupants.
+			if i > 0 && cur[0].LastSeen.Sub(b.LastSeen) > conflictWindow {
+				a.History = appendUnique(a.History, b.MAC)
+				continue
+			}
 			a.MACs = appendUnique(a.MACs, b.MAC)
 			if b.LastSeen.After(a.LastSeen) {
 				a.LastSeen = b.LastSeen
@@ -171,9 +197,14 @@ func Compute(sn model.Subnet, reservations []model.Reservation, bindings []Bindi
 				}
 			}
 		}
-		for _, m := range histByIP[s] {
+		for _, m := range lastKnownByIP[s] {
 			if !contains(a.MACs, m) {
-				a.History = append(a.History, m)
+				a.LastKnown = appendUnique(a.LastKnown, m)
+			}
+		}
+		for _, m := range histByIP[s] {
+			if !contains(a.MACs, m) && !contains(a.LastKnown, m) {
+				a.History = appendUnique(a.History, m)
 			}
 		}
 

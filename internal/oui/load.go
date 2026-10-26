@@ -116,6 +116,7 @@ func Update(ctx context.Context, dataDir string, client *http.Client) (UpdateRes
 		os.Remove(tmp)
 		return UpdateResult{}, fmt.Errorf("replacing %s: %w", path, err)
 	}
+	config.FixOwnership(path)
 	return UpdateResult{Path: path, Source: src, Entries: db.Len()}, nil
 }
 

@@ -190,3 +190,128 @@ func TestSortDevices(t *testing.T) {
 		}
 	}
 }
+
+func TestARPTableIsHearsay(t *testing.T) {
+	e, _ := newTest(t)
+	ch, cancel := e.Subscribe()
+	defer cancel()
+	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	// Stale OS cache says .50 belongs to the old stagebox; the replacement
+	// unit ARPs seconds later. That is not a conflict.
+	e.Observe(model.Observation{MAC: "00:1d:c1:00:00:01", IP: "10.0.0.50", Source: model.SourceARPTable, Timestamp: t0})
+	e.Observe(model.Observation{MAC: "00:1d:c1:00:00:02", IP: "10.0.0.50", Source: model.SourceARP, Timestamp: t0.Add(5 * time.Second)})
+	if k := kinds(drain(ch)); k[model.EventConflict] != 0 {
+		t.Fatalf("ARP-cache entry must not raise a conflict: %v", k)
+	}
+	// Hearsay must not steal ownership from a fresh real claim either.
+	e.Observe(model.Observation{MAC: "00:1d:c1:00:00:01", IP: "10.0.0.50", Source: model.SourceARPTable, Timestamp: t0.Add(10 * time.Second)})
+	e.Observe(model.Observation{MAC: "00:1d:c1:00:00:02", IP: "10.0.0.50", Source: model.SourceARP, Timestamp: t0.Add(15 * time.Second)})
+	if k := kinds(drain(ch)); k[model.EventConflict] != 0 {
+		t.Fatalf("hearsay overwrote a live owner: %v", k)
+	}
+	// Two real claims still conflict.
+	e.Observe(model.Observation{MAC: "00:1d:c1:00:00:03", IP: "10.0.0.50", Source: model.SourceARP, Timestamp: t0.Add(20 * time.Second)})
+	if k := kinds(drain(ch)); k[model.EventConflict] != 1 {
+		t.Fatalf("real claims should conflict: %v", k)
+	}
+}
+
+func TestAttrDeletionPersistsAndListAttrsMerge(t *testing.T) {
+	e, st := newTest(t)
+	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	e.Observe(model.Observation{MAC: "00:1d:c1:00:00:01", IP: "10.0.0.5", Source: model.SourceARP, Timestamp: t0})
+	e.Observe(model.Observation{MAC: "00:1d:c1:00:00:02", IP: "10.0.0.5", Source: model.SourceARP, Timestamp: t0.Add(time.Second)})
+	e.Flush()
+	e.ClearConflict("10.0.0.5")
+	e.Flush()
+	e2, err := New(st, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mac := range []string{"00:1d:c1:00:00:01", "00:1d:c1:00:00:02"} {
+		if d, _ := e2.Device(mac); d.Attrs["conflict_ip"] != "" {
+			t.Errorf("cleared conflict came back from disk for %s: %v", mac, d.Attrs)
+		}
+	}
+
+	// mDNS answers carry different subsets of services per packet: union them.
+	e.Observe(model.Observation{MAC: "00:1d:c1:00:00:07", IP: "10.0.0.7", Source: model.SourceMDNS, Timestamp: t0, Extra: map[string]string{"services": "_netaudio-arc._udp"}})
+	e.Observe(model.Observation{MAC: "00:1d:c1:00:00:07", IP: "10.0.0.7", Source: model.SourceMDNS, Timestamp: t0.Add(time.Second), Extra: map[string]string{"services": "_http._tcp"}})
+	d, _ := e.Device("00:1d:c1:00:00:07")
+	if d.Attrs["services"] != "_http._tcp,_netaudio-arc._udp" {
+		t.Errorf("services should be a union: %q", d.Attrs["services"])
+	}
+	e.Observe(model.Observation{MAC: "00:1d:c1:00:00:07", IP: "10.0.0.7", Source: model.SourceARP, Timestamp: t0.Add(2 * time.Second)})
+	e.Observe(model.Observation{MAC: "00:1d:c1:00:00:07", IP: "10.0.0.7", Source: model.SourceARPTable, Timestamp: t0.Add(3 * time.Second)})
+	d, _ = e.Device("00:1d:c1:00:00:07")
+	if d.Attrs["sources"] != "mdns,arp,arptable" {
+		t.Errorf("sources should list every distinct source: %q", d.Attrs["sources"])
+	}
+}
+
+func TestHostnamePriorityDoesNotFlap(t *testing.T) {
+	e, _ := newTest(t)
+	ch, cancel := e.Subscribe()
+	defer cancel()
+	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	mac := "00:1d:c1:00:00:08"
+	e.Observe(model.Observation{MAC: mac, IP: "10.0.0.8", Hostname: "cl5-dhcp", Source: model.SourceDHCP, Timestamp: t0})
+	e.Observe(model.Observation{MAC: mac, IP: "10.0.0.8", Hostname: "CL5-FOH", Source: model.SourceMDNS, Timestamp: t0.Add(time.Second)})
+	e.Observe(model.Observation{MAC: mac, IP: "10.0.0.8", Hostname: "cl5-dhcp", Source: model.SourceDHCP, Timestamp: t0.Add(2 * time.Second)})
+	d, _ := e.Device(mac)
+	if d.Hostname != "cl5-dhcp" || d.Attrs["mdns_hostname"] != "CL5-FOH" {
+		t.Errorf("equal-priority source should not replace the name: %q attrs=%v", d.Hostname, d.Attrs)
+	}
+	if k := kinds(drain(ch)); k[model.EventHostname] != 0 {
+		t.Errorf("no hostname-change events expected, got %v", k)
+	}
+	// The source that set the name may rename it.
+	e.Observe(model.Observation{MAC: mac, IP: "10.0.0.8", Hostname: "cl5-renamed", Source: model.SourceDHCP, Timestamp: t0.Add(3 * time.Second)})
+	d, _ = e.Device(mac)
+	if d.Hostname != "cl5-renamed" {
+		t.Errorf("same source rename ignored: %q", d.Hostname)
+	}
+	if k := kinds(drain(ch)); k[model.EventHostname] != 1 {
+		t.Errorf("expected one hostname event, got %v", k)
+	}
+	// LLDP (lower priority) never overrides.
+	e.Observe(model.Observation{MAC: mac, Hostname: "sw-port-name", Source: model.SourceLLDP, Timestamp: t0.Add(4 * time.Second)})
+	if d, _ := e.Device(mac); d.Hostname != "cl5-renamed" {
+		t.Errorf("lower priority source replaced the name: %q", d.Hostname)
+	}
+}
+
+func TestSelfAppliedOnLoadAndReload(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	e1, _ := New(st, Options{SelfMAC: "aa:aa:aa:00:00:01"})
+	e1.Observe(model.Observation{MAC: "aa:aa:aa:00:00:01", IP: "10.0.0.2", Source: model.SourceARP, Timestamp: time.Now()})
+	e1.Observe(model.Observation{MAC: "aa:aa:aa:00:00:02", IP: "10.0.0.3", Source: model.SourceARP, Timestamp: time.Now()})
+	e1.Flush()
+	// Restart on a different machine/interface: the old self marker must move.
+	e2, _ := New(st, Options{SelfMAC: "aa:aa:aa:00:00:02"})
+	d1, _ := e2.Device("aa:aa:aa:00:00:01")
+	d2, _ := e2.Device("aa:aa:aa:00:00:02")
+	if d1.Attrs["self"] == "true" || d2.Attrs["self"] != "true" {
+		t.Errorf("self marker not applied at load: %v %v", d1.Attrs, d2.Attrs)
+	}
+	// Labels written straight to the store (import) are picked up by reload.
+	label := "Imported name"
+	_ = st.SetUserFields("aa:aa:aa:00:00:02", &label, nil, []string{"x"})
+	if err := e2.ReloadUserFields("AA:AA:AA:00:00:02"); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := e2.Device("aa:aa:aa:00:00:02"); d.Label != label || len(d.Tags) != 1 {
+		t.Errorf("reload did not pick up user fields: %+v", d)
+	}
+	_ = st.SetUserFields("aa:aa:aa:00:00:09", &label, nil, nil) // never seen
+	if err := e2.ReloadUserFields("aa:aa:aa:00:00:09"); err != nil {
+		t.Fatal(err)
+	}
+	if d, ok := e2.Device("aa:aa:aa:00:00:09"); !ok || d.Label != label || d.Online {
+		t.Errorf("reload of unseen device: %+v %v", d, ok)
+	}
+}

@@ -34,7 +34,8 @@ jobs:
           lipo -info dist/netscout
           ./dist/netscout version
           mkdir -p pkg/netscout-macos
-          cp dist/netscout README.md CHANGELOG.md pkg/netscout-macos/
+          cp dist/netscout README.md CHANGELOG.md LICENSE THIRD_PARTY_NOTICES.md PLAN.md pkg/netscout-macos/
+          cp -r docs pkg/netscout-macos/docs
           cp docs/INSTALL-macOS.md pkg/netscout-macos/INSTALL.md
           (cd pkg && zip -r "../netscout-${GITHUB_REF_NAME}-macos-universal.zip" netscout-macos)
       - uses: actions/upload-artifact@v4
@@ -58,7 +59,8 @@ jobs:
           echo "$VERSION" > VERSION
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/netscout.exe ./cmd/netscout
           mkdir -p pkg/netscout-windows
-          cp dist/netscout.exe README.md CHANGELOG.md pkg/netscout-windows/
+          cp dist/netscout.exe README.md CHANGELOG.md LICENSE THIRD_PARTY_NOTICES.md PLAN.md pkg/netscout-windows/
+          cp -r docs pkg/netscout-windows/docs
           cp docs/INSTALL-Windows.md pkg/netscout-windows/INSTALL.md
           (cd pkg && zip -r "../netscout-${GITHUB_REF_NAME}-windows-amd64.zip" netscout-windows)
       - uses: actions/upload-artifact@v4
@@ -83,7 +85,8 @@ jobs:
           echo "$VERSION" > VERSION
           CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o dist/netscout ./cmd/netscout
           mkdir -p pkg/netscout-linux
-          cp dist/netscout README.md CHANGELOG.md pkg/netscout-linux/
+          cp dist/netscout README.md CHANGELOG.md LICENSE THIRD_PARTY_NOTICES.md PLAN.md pkg/netscout-linux/
+          cp -r docs pkg/netscout-linux/docs
           (cd pkg && tar czf "../netscout-${GITHUB_REF_NAME}-linux-amd64.tar.gz" netscout-linux)
       - uses: actions/upload-artifact@v4
         with:

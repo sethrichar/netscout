@@ -1,6 +1,7 @@
 package store
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -137,5 +138,35 @@ func TestMeta(t *testing.T) {
 	}
 	if v, _ := s.GetMeta("iface"); v != "en1" {
 		t.Fatalf("got %q", v)
+	}
+}
+
+func TestOpenWithAwkwardPath(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "show #3 100%")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "net?scout.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := s.SetMeta("k", "v"); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("database was not created at the requested path: %v", err)
+	}
+}
+
+func TestTimestampLayoutIsFixedWidth(t *testing.T) {
+	a := fmtTime(time.Date(2026, 1, 1, 0, 0, 0, 500000000, time.UTC))
+	b := fmtTime(time.Date(2026, 1, 1, 0, 0, 0, 500000001, time.UTC))
+	if len(a) != len(b) || !(a < b) {
+		t.Errorf("layout must be fixed width and order lexically: %q %q", a, b)
+	}
+	if got := parseTime("2026-01-01T00:00:00.5Z"); got.Nanosecond() != 500000000 {
+		t.Errorf("old RFC3339Nano rows must still parse: %v", got)
 	}
 }

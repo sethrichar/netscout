@@ -4,6 +4,8 @@ import (
 	"net"
 	"testing"
 
+	"github.com/sethrichar/netscout/internal/capture"
+
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 )
@@ -60,6 +62,26 @@ func TestARPRequestFrame(t *testing.T) {
 	// gopacket pads to the 60-byte Ethernet minimum (42 bytes of real frame).
 	if len(frame) != 60 {
 		t.Errorf("frame length %d, want 60 (padded minimum frame)", len(frame))
+	}
+}
+
+func TestDefaultCIDR(t *testing.T) {
+	cases := map[string]string{
+		"10.0.0.20/24":   "10.0.0.0/24",
+		"10.0.4.20/22":   "10.0.4.0/22",
+		"10.1.2.3/16":    "10.1.2.0/24", // too wide: narrow to our /24
+		"169.254.7.9/16": "169.254.7.0/24",
+		"192.168.1.5/25": "192.168.1.0/25",
+		"172.16.9.9/8":   "172.16.9.0/24",
+	}
+	for cidr, want := range cases {
+		got := DefaultCIDR(capture.Interface{IPv4: []string{cidr}})
+		if got != want {
+			t.Errorf("DefaultCIDR(%s) = %s, want %s", cidr, got, want)
+		}
+	}
+	if got := DefaultCIDR(capture.Interface{}); got != "" {
+		t.Errorf("no address should give empty, got %s", got)
 	}
 }
 

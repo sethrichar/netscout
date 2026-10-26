@@ -69,6 +69,26 @@ func Hosts(cidr string) ([]net.IP, *net.IPNet, error) {
 	return hosts, ipnet, nil
 }
 
+// DefaultCIDR picks the range to sweep when the operator gave none: the
+// interface's own subnet, narrowed to the /24 around our address when the
+// subnet is wider than /22 or is the 169.254/16 link-local block (the normal
+// state of a DHCP-less show switch), so a default sweep never fires 65k
+// broadcasts. Returns "" when the interface has no IPv4 address.
+func DefaultCIDR(iface capture.Interface) string {
+	nets := iface.LocalNets()
+	ip := iface.FirstIPv4()
+	if len(nets) == 0 || ip == nil {
+		return ""
+	}
+	n := nets[0]
+	ones, bits := n.Mask.Size()
+	if bits-ones > 10 || ip.IsLinkLocalUnicast() {
+		slash24 := &net.IPNet{IP: ip.Mask(net.CIDRMask(24, 32)), Mask: net.CIDRMask(24, 32)}
+		return slash24.String()
+	}
+	return n.String()
+}
+
 // ARPRequest builds a broadcast who-has frame from us for target.
 func ARPRequest(srcMAC net.HardwareAddr, srcIP, target net.IP) ([]byte, error) {
 	eth := &layers.Ethernet{

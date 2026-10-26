@@ -37,8 +37,16 @@ func TestParseCSVHeaderlessAndTabs(t *testing.T) {
 	if len(imp.Rows) != 2 || imp.Rows[0].Label != "QL1 monitors" || imp.Rows[0].Notes != "mon world" || imp.Rows[1].IP != "10.0.0.6" {
 		t.Errorf("rows: %+v", imp.Rows)
 	}
+	// A bad cell skips its row with a warning rather than aborting the file.
+	imp2, err := Parse(strings.NewReader("name,ip,mac\nx,not-an-ip,\ny,10.0.0.9,DHCP\nz,10.0.0.10,\n"))
+	if err != nil {
+		t.Fatalf("bad cells should not abort: %v", err)
+	}
+	if len(imp2.Rows) != 2 || len(imp2.Warnings) != 2 || imp2.Rows[0].MAC != "" {
+		t.Errorf("rows=%+v warnings=%v", imp2.Rows, imp2.Warnings)
+	}
 	if _, err := Parse(strings.NewReader("name,ip\nx,not-an-ip\n")); err == nil {
-		t.Error("bad IP should error")
+		t.Error("a file with no usable rows should error")
 	}
 	if _, err := Parse(strings.NewReader("just,text\nno,addresses\n")); err == nil {
 		t.Error("no usable rows should error")
@@ -109,6 +117,70 @@ func TestJSONRoundTripAndApply(t *testing.T) {
 	rep2, err := Apply(st2, imp2, ApplyOptions{})
 	if err != nil || rep2.ReservationsWritten != 1 || len(rep2.SubnetsCreated) != 0 {
 		t.Errorf("re-import: %+v %v", rep2, err)
+	}
+}
+
+func TestHeaderGuessAndPriority(t *testing.T) {
+	// Unrecognised IP header ("Adresse IP") → column adopted by shape.
+	imp, err := Parse(strings.NewReader("Nom,Adresse IP,Remarques\nCL5,10.0.0.20,FOH\nRio,10.0.0.21,stage\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imp.Rows) != 2 || imp.Rows[0].IP != "10.0.0.20" {
+		t.Errorf("ip column should be guessed: %+v", imp.Rows)
+	}
+	// "hostname" and "label" both present: label wins regardless of order.
+	imp, _ = Parse(strings.NewReader("hostname,ip,label\ncl5-dhcp,10.0.0.20,CL5 FOH\n"))
+	if imp.Rows[0].Label != "CL5 FOH" {
+		t.Errorf("label should beat hostname: %+v", imp.Rows[0])
+	}
+}
+
+func TestDevicesCSVRoundTripIsDeviceOnly(t *testing.T) {
+	st, _ := store.Open(filepath.Join(t.TempDir(), "d.db"))
+	defer st.Close()
+	devs := []model.Device{{MAC: "00:1d:c1:00:00:01", IPs: []string{"10.0.0.5"}, Hostname: "cl5-dhcp", Label: "CL5 FOH", Vendor: "=cmd()", Tags: []string{"foh"}}}
+	var buf bytes.Buffer
+	if err := WriteDevicesCSV(&buf, devs); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `'=cmd()`) {
+		t.Errorf("formula cell not neutralised: %s", buf.String())
+	}
+	imp, err := Parse(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !imp.DevicesOnly || len(imp.Rows) != 1 || imp.Rows[0].IP != "" || imp.Rows[0].Label != "CL5 FOH" || len(imp.Rows[0].Tags) != 1 {
+		t.Errorf("devices export should re-import as labels only: devicesOnly=%v rows=%+v", imp.DevicesOnly, imp.Rows)
+	}
+	rep, err := Apply(st, imp, ApplyOptions{})
+	if err != nil || rep.ReservationsWritten != 0 || rep.DevicesLabelled != 1 {
+		t.Errorf("apply: %+v %v", rep, err)
+	}
+}
+
+func TestApplyDuplicatesAndDryRunCount(t *testing.T) {
+	st, _ := store.Open(filepath.Join(t.TempDir(), "dup.db"))
+	defer st.Close()
+	imp, _ := Parse(strings.NewReader("ip,mac,name\n10.0.0.5,00:1d:c1:00:00:05,A\n10.0.0.5,00:1d:c1:00:00:06,B\n"))
+	dry, err := Apply(st, imp, ApplyOptions{DefaultSubnet: "10.0.0.0/24", DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dry.ReservationsWritten != 1 || dry.DevicesLabelled != 1 || len(dry.Skipped) != 1 {
+		t.Errorf("dry run: %+v", dry)
+	}
+	real, err := Apply(st, imp, ApplyOptions{DefaultSubnet: "10.0.0.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if real.ReservationsWritten != dry.ReservationsWritten || real.DevicesLabelled != dry.DevicesLabelled || len(real.Skipped) != len(dry.Skipped) {
+		t.Errorf("dry run and real run disagree: %+v vs %+v", dry, real)
+	}
+	res, _ := st.ListReservations(0)
+	if len(res) != 1 || res[0].Label != "A" {
+		t.Errorf("first row should win, second skipped: %+v", res)
 	}
 }
 

@@ -85,3 +85,28 @@ func TestListBindings(t *testing.T) {
 		t.Fatalf("bindings: %+v %v", b, err)
 	}
 }
+
+func TestSubnetAndReservationValidation(t *testing.T) {
+	s := openTest(t)
+	for _, bad := range []string{"fe80::/64", "10.0.0.0/8", "10.0.0.0/15", "nope"} {
+		if _, err := s.AddSubnet(model.Subnet{CIDR: bad}); err == nil {
+			t.Errorf("AddSubnet(%q) should fail", bad)
+		}
+	}
+	if _, err := s.AddSubnet(model.Subnet{CIDR: "10.0.0.0/24", Gateway: "10.0.1.1"}); err == nil {
+		t.Error("gateway outside the subnet should fail")
+	}
+	sn, err := s.AddSubnet(model.Subnet{CIDR: "10.0.0.0/16", Gateway: "10.0.0.1"})
+	if err != nil {
+		t.Fatalf("/16 should be allowed: %v", err)
+	}
+	if _, err := s.UpsertReservation(model.Reservation{SubnetID: sn.ID, IP: "192.168.1.5", Label: "elsewhere"}); err == nil {
+		t.Error("reservation outside its subnet should fail")
+	}
+	if _, err := s.UpsertReservation(model.Reservation{SubnetID: 999, IP: "10.0.0.5"}); err == nil {
+		t.Error("reservation in a missing subnet should fail")
+	}
+	if r, err := s.UpsertReservation(model.Reservation{SubnetID: sn.ID, IP: "10.0.7.9", Label: "ok"}); err != nil || r.IP != "10.0.7.9" {
+		t.Errorf("valid reservation: %+v %v", r, err)
+	}
+}

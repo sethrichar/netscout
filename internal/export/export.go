@@ -56,8 +56,8 @@ func WriteDevicesCSV(w io.Writer, devs []model.Device) error {
 			other = strings.Join(d.IPs[1:], " ")
 		}
 		row := []string{
-			d.IP(), d.MAC, d.Vendor, d.Hostname, d.Label, strings.Join(d.Tags, ";"), d.Notes,
-			boolStr(d.Online), fmtTime(d.FirstSeen), fmtTime(d.LastSeen), other, d.Attrs["services"], boolStr(d.Randomized),
+			d.IP(), d.MAC, safeCell(d.Vendor), safeCell(d.Hostname), safeCell(d.Label), safeCell(strings.Join(d.Tags, ";")), safeCell(d.Notes),
+			boolStr(d.Online), fmtTime(d.FirstSeen), fmtTime(d.LastSeen), other, safeCell(d.Attrs["services"]), boolStr(d.Randomized),
 		}
 		if err := cw.Write(row); err != nil {
 			return err
@@ -65,6 +65,20 @@ func WriteDevicesCSV(w io.Writer, devs []model.Device) error {
 	}
 	cw.Flush()
 	return cw.Error()
+}
+
+// safeCell neutralises spreadsheet formula injection: hostnames and vendor
+// strings come off the wire, and a cell starting with = + - @ would be
+// evaluated by Excel/Sheets when the show doc is opened.
+func safeCell(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + s
+	}
+	return s
 }
 
 // ReservationCSVHeader is the column order of WriteReservationsCSV — and the
@@ -88,7 +102,7 @@ func WriteReservationsCSV(w io.Writer, subnets []model.Subnet, res []model.Reser
 		return ipLess(res[i].IP, res[j].IP)
 	})
 	for _, r := range res {
-		if err := cw.Write([]string{byID[r.SubnetID], r.IP, r.MAC, r.Label, r.Notes}); err != nil {
+		if err := cw.Write([]string{byID[r.SubnetID], r.IP, r.MAC, safeCell(r.Label), safeCell(r.Notes)}); err != nil {
 			return err
 		}
 	}
@@ -114,6 +128,14 @@ type Row struct {
 type Import struct {
 	Subnets []model.Subnet // only from JSON snapshots
 	Rows    []Row
+	// Warnings are per-row problems that did not stop the import (an
+	// unparseable IP cell, a duplicate address). Apply copies them into the
+	// report so the operator sees them.
+	Warnings []string
+	// DevicesOnly is set when the file is netscout's own devices export: its
+	// rows carry labels/notes/tags for devices and are not an IP plan, so no
+	// reservations are created from them.
+	DevicesOnly bool
 }
 
 // Parse detects JSON (netscout snapshot) or CSV and returns the rows.
@@ -140,26 +162,47 @@ func parseJSON(data []byte) (*Import, error) {
 		byID[sn.ID] = sn.CIDR
 	}
 	for i, r := range s.Reservations {
+		if p := net.ParseIP(r.IP); p == nil || p.To4() == nil {
+			return nil, fmt.Errorf("reservation %d: %q is not an IPv4 address", i+1, r.IP)
+		}
+		if r.MAC != "" {
+			m, err := model.NormalizeMAC(r.MAC)
+			if err != nil {
+				return nil, fmt.Errorf("reservation %d: %w", i+1, err)
+			}
+			r.MAC = m
+		}
 		imp.Rows = append(imp.Rows, Row{Line: i + 1, Subnet: byID[r.SubnetID], IP: r.IP, MAC: r.MAC, Label: r.Label, Notes: r.Notes})
 	}
 	for i, d := range s.Devices {
 		if d.Label == "" && d.Notes == "" && len(d.Tags) == 0 {
 			continue
 		}
-		imp.Rows = append(imp.Rows, Row{Line: len(s.Reservations) + i + 1, MAC: d.MAC, Label: d.Label, Notes: d.Notes, Tags: d.Tags})
+		m, err := model.NormalizeMAC(d.MAC)
+		if err != nil {
+			return nil, fmt.Errorf("device %d: %w", i+1, err)
+		}
+		imp.Rows = append(imp.Rows, Row{Line: len(s.Reservations) + i + 1, MAC: m, Label: d.Label, Notes: d.Notes, Tags: d.Tags})
 	}
 	return imp, nil
 }
 
-// Column aliases accepted in CSV headers (lower-cased, trimmed).
-var columnAliases = map[string]string{
-	"ip": "ip", "ip address": "ip", "ipaddress": "ip", "address": "ip", "ipv4": "ip", "ip addr": "ip",
-	"mac": "mac", "mac address": "mac", "macaddress": "mac", "hw address": "mac", "hwaddr": "mac", "ethernet": "mac", "hardware address": "mac",
-	"label": "label", "name": "label", "device": "label", "device name": "label", "hostname": "label", "host": "label", "description": "label", "desc": "label", "unit": "label",
-	"notes": "notes", "note": "notes", "comment": "notes", "comments": "notes", "location": "notes",
-	"subnet": "subnet", "cidr": "subnet", "network": "subnet", "net": "subnet",
-	"tags": "tags", "tag": "tags", "group": "tags", "category": "tags", "type": "tags",
-	"vlan": "vlan",
+// Column aliases accepted in CSV headers (lower-cased, trimmed), with a rank:
+// when two columns map to the same field the lower rank wins, so an explicit
+// "label" beats "hostname" and "ip address" beats a stray "address".
+type alias struct {
+	canon string
+	rank  int
+}
+
+var columnAliases = map[string]alias{
+	"ip": {"ip", 0}, "ip address": {"ip", 0}, "ipaddress": {"ip", 0}, "ipv4": {"ip", 0}, "ipv4 address": {"ip", 0}, "ip addr": {"ip", 0}, "static ip": {"ip", 1}, "address": {"ip", 2},
+	"mac": {"mac", 0}, "mac address": {"mac", 0}, "macaddress": {"mac", 0}, "mac addr": {"mac", 0}, "hardware address": {"mac", 1}, "hw address": {"mac", 1}, "hwaddr": {"mac", 1}, "ethernet": {"mac", 2},
+	"label": {"label", 0}, "name": {"label", 1}, "device name": {"label", 1}, "device": {"label", 2}, "unit": {"label", 2}, "hostname": {"label", 3}, "host": {"label", 3}, "description": {"label", 4}, "desc": {"label", 4},
+	"notes": {"notes", 0}, "note": {"notes", 0}, "comment": {"notes", 1}, "comments": {"notes", 1}, "location": {"notes", 2},
+	"subnet": {"subnet", 0}, "cidr": {"subnet", 0}, "network": {"subnet", 1}, "net": {"subnet", 2},
+	"tags": {"tags", 0}, "tag": {"tags", 0}, "group": {"tags", 1}, "category": {"tags", 1}, "type": {"tags", 2},
+	"vlan": {"vlan", 0},
 }
 
 func parseCSV(text string) (*Import, error) {
@@ -184,22 +227,33 @@ func parseCSV(text string) (*Import, error) {
 
 	// Header detection: a header row has no IP/MAC-looking cells.
 	cols := map[string]int{}
+	rank := map[string]int{}
 	start := 0
 	if !looksLikeData(records[0]) {
 		for i, h := range records[0] {
 			key := strings.ToLower(strings.TrimSpace(h))
-			if canon, ok := columnAliases[key]; ok {
-				if _, dup := cols[canon]; !dup {
-					cols[canon] = i
+			if a, ok := columnAliases[key]; ok {
+				if r, dup := rank[a.canon]; !dup || a.rank < r {
+					cols[a.canon], rank[a.canon] = i, a.rank
 				}
 			}
 		}
 		start = 1
-	}
-	if _, ok := cols["ip"]; !ok && start == 1 {
-		// No recognised IP column — maybe there is no header and the first row was data.
-		if looksLikeData(records[0]) {
-			start = 0
+		// netscout's own devices export: labels for devices, not an IP plan.
+		if _, hasVendor := indexOf(records[0], "vendor"); hasVendor {
+			if _, hasFirst := indexOf(records[0], "first_seen"); hasFirst {
+				imp.DevicesOnly = true
+			}
+		}
+		// A header was found but no IP (or MAC) column was recognised: adopt
+		// the column whose cells look like addresses instead of silently
+		// importing everything as label-only rows.
+		for _, want := range []string{"ip", "mac"} {
+			if _, ok := cols[want]; !ok {
+				if idx := guessColumn(records[1:], want); idx >= 0 {
+					cols[want] = idx
+				}
+			}
 		}
 	}
 	for i := start; i < len(records); i++ {
@@ -220,6 +274,9 @@ func parseCSV(text string) (*Import, error) {
 			}
 			if v := cell(rec, cols, "vlan"); v != "" {
 				fmt.Sscanf(v, "%d", &row.VLAN)
+			}
+			if imp.DevicesOnly {
+				row.IP = "" // keep label/notes/tags only
 			}
 		} else {
 			// Headerless: guess each cell by shape. ip, mac, then label, notes.
@@ -242,18 +299,23 @@ func parseCSV(text string) (*Import, error) {
 				row.Notes = strings.Join(rest[1:], " / ")
 			}
 		}
+		// A cell that is not an address ("DHCP", "TBD", a range) is a problem
+		// for that row only: report it and keep going.
 		row.IP = strings.TrimSpace(row.IP)
 		if row.IP != "" {
 			if p := net.ParseIP(row.IP); p == nil || p.To4() == nil {
-				return nil, fmt.Errorf("line %d: %q is not an IPv4 address", row.Line, row.IP)
+				imp.Warnings = append(imp.Warnings, fmt.Sprintf("line %d: %q is not an IPv4 address; row skipped", row.Line, row.IP))
+				continue
 			}
 		}
 		if row.MAC != "" {
 			m, err := model.NormalizeMAC(row.MAC)
 			if err != nil {
-				return nil, fmt.Errorf("line %d: %w", row.Line, err)
+				imp.Warnings = append(imp.Warnings, fmt.Sprintf("line %d: %q is not a MAC address; MAC ignored", row.Line, row.MAC))
+				row.MAC = ""
+			} else {
+				row.MAC = m
 			}
-			row.MAC = m
 		}
 		if row.IP == "" && row.MAC == "" {
 			continue
@@ -261,9 +323,62 @@ func parseCSV(text string) (*Import, error) {
 		imp.Rows = append(imp.Rows, row)
 	}
 	if len(imp.Rows) == 0 {
-		return nil, fmt.Errorf("no rows with an IP or MAC found (recognised columns: ip, mac, label/name, notes, subnet, tags)")
+		msg := "no rows with an IP or MAC found (recognised columns: ip, mac, label/name, notes, subnet, tags)"
+		if len(imp.Warnings) > 0 {
+			msg += "; " + strings.Join(imp.Warnings, "; ")
+		}
+		return nil, fmt.Errorf("%s", msg)
 	}
 	return imp, nil
+}
+
+// indexOf finds a header cell by exact (case-insensitive) name.
+func indexOf(header []string, name string) (int, bool) {
+	for i, h := range header {
+		if strings.EqualFold(strings.TrimSpace(h), name) {
+			return i, true
+		}
+	}
+	return -1, false
+}
+
+// guessColumn returns the index of the column whose non-empty cells are
+// mostly IPv4 addresses (want="ip") or MACs (want="mac"), or -1.
+func guessColumn(rows [][]string, want string) int {
+	best, bestScore := -1, 0
+	width := 0
+	for _, r := range rows {
+		if len(r) > width {
+			width = len(r)
+		}
+	}
+	for c := 0; c < width; c++ {
+		hits, total := 0, 0
+		for _, r := range rows {
+			if c >= len(r) {
+				continue
+			}
+			v := strings.TrimSpace(r[c])
+			if v == "" {
+				continue
+			}
+			total++
+			switch want {
+			case "ip":
+				if p := net.ParseIP(v); p != nil && p.To4() != nil {
+					hits++
+				}
+			case "mac":
+				if isMAC(v) {
+					hits++
+				}
+			}
+		}
+		if total > 0 && hits*2 > total && hits > bestScore {
+			best, bestScore = c, hits
+		}
+	}
+	return best
 }
 
 func cell(rec []string, cols map[string]int, key string) string {

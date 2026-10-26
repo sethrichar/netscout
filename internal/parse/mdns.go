@@ -16,6 +16,9 @@ import (
 //     sleep proxy or a multi-homed host's other interface.
 //   - PTR records under a service type (e.g. _netaudio-arc._udp.local for
 //     Dante) and SRV records name the services the host offers.
+//   - A response that carries A records for other hosts but none for the
+//     sender is hearsay (Bonjour reflector/gateway, sleep proxy): nothing in
+//     it is attributed to the frame source.
 //   - Queries carry no facts about the sender beyond liveness; the generic
 //     IPv4 observation covers that, so queries return nothing here.
 func MDNS(ctx Context, dns *layers.DNS) []model.Observation {
@@ -27,6 +30,21 @@ func MDNS(ctx Context, dns *layers.DNS) []model.Observation {
 	services := map[string]bool{}
 	instances := map[string]bool{}
 	var hostname string
+	aRecords, aMatching := 0, 0
+	ownNames := map[string]bool{} // names whose A record matches the sender
+
+	for _, rr := range append(append([]layers.DNSResourceRecord{}, dns.Answers...), dns.Additionals...) {
+		if rr.Type == layers.DNSTypeA && rr.IP != nil {
+			aRecords++
+			if ctx.SrcIP != nil && rr.IP.Equal(ctx.SrcIP) {
+				aMatching++
+				ownNames[strings.ToLower(strings.TrimSuffix(string(rr.Name), "."))] = true
+			}
+		}
+	}
+	if aRecords > 0 && aMatching == 0 {
+		return nil // speaking for someone else
+	}
 
 	consider := func(rr layers.DNSResourceRecord) {
 		name := strings.TrimSuffix(string(rr.Name), ".")
@@ -60,7 +78,10 @@ func MDNS(ctx Context, dns *layers.DNS) []model.Observation {
 					instances[inst] = true
 				}
 			}
-			if t := hostFromName(strings.TrimSuffix(string(rr.SRV.Name), ".")); t != "" && hostname == "" {
+			// The SRV target names the host only when this packet proves the
+			// target is the sender (an A record for it matching the source IP).
+			target := strings.TrimSuffix(string(rr.SRV.Name), ".")
+			if t := hostFromName(target); t != "" && hostname == "" && ownNames[strings.ToLower(target)] {
 				hostname = t
 			}
 		case layers.DNSTypeTXT:

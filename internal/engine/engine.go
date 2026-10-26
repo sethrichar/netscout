@@ -30,6 +30,7 @@ type Options struct {
 	ConflictWindow time.Duration // same IP, different MAC inside this window = conflict (default 2m)
 	FlushInterval  time.Duration // how often dirty devices are written (default 2s)
 	ObsLogInterval time.Duration // min gap between logged observations per (mac,source) (default 60s)
+	ObsRetention   time.Duration // observation rows older than this are pruned hourly (default 7 days)
 	Vendors        VendorLookup  // optional
 	Logger         *log.Logger   // optional
 }
@@ -47,20 +48,25 @@ func (o *Options) defaults() {
 	if o.ObsLogInterval <= 0 {
 		o.ObsLogInterval = 60 * time.Second
 	}
+	if o.ObsRetention <= 0 {
+		o.ObsRetention = 7 * 24 * time.Hour
+	}
 }
 
 type devState struct {
 	dev        model.Device
 	ips        map[string]*store.IPSeen
-	hostSource int // priority of the source that set the hostname
+	hostSource int    // priority of the source that set the hostname
+	hostFrom   string // which source set it (same source may rename; equal-priority others may not)
 	dirty      bool
 	wentOff    bool                 // went offline during this run (so a return is news)
 	lastLogged map[string]time.Time // source → last observation row written
 }
 
 type ipOwner struct {
-	mac string
-	ts  time.Time
+	mac     string
+	ts      time.Time
+	hearsay bool // learned from the OS ARP cache or an ARP reply target, not a direct claim
 }
 
 // Engine is safe for concurrent use.
@@ -119,7 +125,23 @@ func New(st *store.Store, opts Options) (*Engine, error) {
 		e.classify(ds)
 		e.devices[d.MAC] = ds
 	}
+	e.applySelfLocked(opts.SelfMAC)
 	return e, nil
+}
+
+// applySelfLocked keeps exactly one device tagged as this machine.
+func (e *Engine) applySelfLocked(selfMAC string) {
+	for mac, ds := range e.devices {
+		if selfMAC != "" && mac == selfMAC {
+			if ds.dev.Attrs["self"] != "true" {
+				ds.dev.Attrs["self"] = "true"
+				ds.dirty = true
+			}
+		} else if ds.dev.Attrs["self"] == "true" {
+			delete(ds.dev.Attrs, "self")
+			ds.dirty = true
+		}
+	}
 }
 
 // classify fills vendor and the randomized flag for a device that lacks them
@@ -150,6 +172,9 @@ func (e *Engine) Run(ctx context.Context) {
 	defer flush.Stop()
 	sweep := time.NewTicker(5 * time.Second)
 	defer sweep.Stop()
+	prune := time.NewTicker(time.Hour)
+	defer prune.Stop()
+	e.pruneObservations()
 	for {
 		select {
 		case <-ctx.Done():
@@ -158,7 +183,17 @@ func (e *Engine) Run(ctx context.Context) {
 			e.Flush()
 		case <-sweep.C:
 			e.sweepOffline(time.Now())
+		case <-prune.C:
+			e.pruneObservations()
 		}
+	}
+}
+
+func (e *Engine) pruneObservations() {
+	if n, err := e.store.PruneObservations(time.Now().Add(-e.opts.ObsRetention)); err != nil {
+		e.logf("prune observations: %v", err)
+	} else if n > 0 {
+		e.logf("pruned %d observation rows older than %s", n, e.opts.ObsRetention)
 	}
 }
 
@@ -267,7 +302,11 @@ func (e *Engine) Observe(o model.Observation) {
 
 	if o.Hostname != "" {
 		prio := hostPriority(o.Source)
-		if d.Hostname == "" || prio > ds.hostSource || (prio == ds.hostSource && o.Hostname != d.Hostname) {
+		// A higher-priority source wins; the source that set the name may
+		// rename it; a different source of equal priority is recorded as an
+		// attribute instead of flapping the name back and forth.
+		switch {
+		case d.Hostname == "" || prio > ds.hostSource || (prio == ds.hostSource && o.Source == ds.hostFrom):
 			if d.Hostname != "" && d.Hostname != o.Hostname {
 				events = append(events, model.Event{
 					Time: o.Timestamp, Kind: model.EventHostname, MAC: mac, IP: o.IP,
@@ -278,21 +317,31 @@ func (e *Engine) Observe(o model.Observation) {
 				logObs = true
 			}
 			d.Hostname = o.Hostname
-			ds.hostSource = prio
+			ds.hostSource, ds.hostFrom = prio, o.Source
+		case o.Hostname != d.Hostname:
+			if k := o.Source + "_hostname"; d.Attrs[k] != o.Hostname {
+				d.Attrs[k] = o.Hostname
+				logObs = true
+			}
 		}
 	}
 	for k, v := range o.Extra {
 		if v == "" || strings.HasPrefix(k, "arp_") {
 			continue // ARP op details are noise at the device level
 		}
+		if model.ListAttrKeys[k] {
+			if merged := unionTokens(d.Attrs[k], v); merged != d.Attrs[k] {
+				d.Attrs[k] = merged
+				logObs = true
+			}
+			continue
+		}
 		if d.Attrs[k] != v {
 			d.Attrs[k] = v
 			logObs = true
 		}
 	}
-	if _, ok := d.Attrs["sources"]; !ok || !strings.Contains(d.Attrs["sources"], o.Source) {
-		d.Attrs["sources"] = addToken(d.Attrs["sources"], o.Source)
-	}
+	d.Attrs["sources"] = addToken(d.Attrs["sources"], o.Source)
 
 	if isNew {
 		events = append([]model.Event{{
@@ -351,17 +400,25 @@ func (e *Engine) acceptIP(o model.Observation) bool {
 
 // checkConflictLocked updates the IP ownership table and returns a conflict
 // event when a different MAC claims an IP that was in use moments ago.
+//
+// Hearsay — the target side of an ARP reply, or an entry read from the OS ARP
+// cache (which may be many minutes stale) — never raises a conflict and only
+// takes ownership of an address nobody has claimed recently.
 func (e *Engine) checkConflictLocked(mac string, o model.Observation) *model.Event {
 	cur, ok := e.owners[o.IP]
-	defer func() { e.owners[o.IP] = ipOwner{mac: mac, ts: o.Timestamp} }()
-	if !ok || cur.mac == mac {
+	hearsay := o.Source == model.SourceARPTable || o.Extra["arp_op"] == "reply-target"
+	if hearsay {
+		if !ok || cur.mac == mac || o.Timestamp.Sub(cur.ts) > e.opts.ConflictWindow {
+			e.owners[o.IP] = ipOwner{mac: mac, ts: o.Timestamp, hearsay: true}
+		}
 		return nil
+	}
+	defer func() { e.owners[o.IP] = ipOwner{mac: mac, ts: o.Timestamp} }()
+	if !ok || cur.mac == mac || cur.hearsay {
+		return nil // nobody, ourselves, or only hearsay held it: a plain takeover
 	}
 	if o.Timestamp.Sub(cur.ts) > e.opts.ConflictWindow {
 		return nil // stale ownership: a normal lease change
-	}
-	if o.Extra["arp_op"] == "reply-target" {
-		return nil // the target side of an ARP reply is hearsay, not a claim
 	}
 	if last, ok := e.conflicts[o.IP]; ok && o.Timestamp.Sub(last) < e.opts.ConflictWindow {
 		return nil // already reported inside this window
@@ -608,15 +665,35 @@ func (e *Engine) SetInterface(name string, nets []*net.IPNet, selfMAC string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.opts.Interface, e.opts.LocalNets, e.opts.SelfMAC = name, nets, selfMAC
-	for mac, ds := range e.devices {
-		if mac == selfMAC {
-			ds.dev.Attrs["self"] = "true"
-			ds.dirty = true
-		} else if ds.dev.Attrs["self"] == "true" {
-			delete(ds.dev.Attrs, "self")
-			ds.dirty = true
-		}
+	e.applySelfLocked(selfMAC)
+}
+
+// ReloadUserFields re-reads label/notes/tags for a MAC from the store (after
+// an import wrote them directly) so the live table reflects them.
+func (e *Engine) ReloadUserFields(mac string) error {
+	mac, err := model.NormalizeMAC(mac)
+	if err != nil {
+		return err
 	}
+	d, err := e.store.GetDevice(mac)
+	if err != nil || d == nil {
+		return err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ds, ok := e.devices[mac]
+	if !ok {
+		ds = &devState{dev: *d, ips: map[string]*store.IPSeen{}, lastLogged: map[string]time.Time{}}
+		if ds.dev.Attrs == nil {
+			ds.dev.Attrs = map[string]string{}
+		}
+		ds.dev.Online = false
+		e.classify(ds)
+		e.devices[mac] = ds
+		return nil
+	}
+	ds.dev.Label, ds.dev.Notes, ds.dev.Tags = d.Label, d.Notes, d.Tags
+	return nil
 }
 
 // SetVendors swaps the vendor lookup (after update-oui) and re-resolves
@@ -697,6 +774,24 @@ func vendorOrRandom(d *model.Device) string {
 	default:
 		return "[unknown vendor]"
 	}
+}
+
+// unionTokens merges two comma-separated sets, sorted and de-duplicated.
+func unionTokens(a, b string) string {
+	set := map[string]bool{}
+	for _, part := range []string{a, b} {
+		for _, t := range strings.Split(part, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				set[t] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for t := range set {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
 }
 
 func addToken(list, tok string) string {

@@ -3,6 +3,78 @@
 All notable changes to netscout. Working revisions are `0.x`; published
 releases are whole numbers. Versions are never removed — only revised up.
 
+## v0.8 — Hardening pass (adversarial review: 56 confirmed findings fixed)
+
+Every subsystem was reviewed by independent finders and each finding verified
+by three skeptics before being fixed. Highlights:
+
+**False alarms removed**
+- The OS ARP cache is no longer consulted in active capture mode (its
+  minutes-old entries seeded phantom "online" devices, bogus "went offline"
+  events and false IP conflicts at every start). Cache entries are hearsay
+  for conflict detection in passive mode too.
+- LLDP/CDP management addresses are attributes only — the per-port MAC that
+  sends LLDP is not the MAC that answers ARP for the switch IP, which raised
+  a recurring false conflict on the gateway.
+- mDNS answers that carry A records for other hosts (Bonjour reflectors,
+  sleep proxies) are not attributed to the sender; SRV targets name the host
+  only when the same packet proves it.
+- DHCP OFFER no longer binds an address (only ACK does); relay agents are
+  labelled as relays, not servers.
+- IPAM: an offline device's last address is shown as "last known", not as a
+  live claim; two MACs on one address count as a conflict only when seen
+  within the conflict window of each other (a DHCP lease change is not a
+  conflict).
+- Hostnames no longer flap between DHCP and mDNS names of equal priority;
+  services from mDNS are merged as a union instead of replaced per packet.
+
+**Crashes and lifecycle**
+- Switching interfaces during an ARP sweep (or a dead capture) dereferenced a
+  freed pcap handle. Sessions now carry a closed flag; sweeps are cancelled
+  and awaited before capture is torn down; the target interface is validated
+  before the current one is closed.
+- A capture that dies on its own (cable pulled) is reported as an event and
+  the tool drops to passive mode instead of silently showing "capturing".
+- Ctrl-C no longer stalls two seconds waiting for SSE streams.
+- Cleared conflicts and the "this machine" marker are persisted (attr
+  deletions reached memory only).
+
+**Security**
+- Local API rejects cross-site browser requests (Sec-Fetch-Site / Origin
+  checks) and requires `application/json`, closing a CSRF hole; loopback
+  Host check now covers IPv6 forms.
+- CSV exports neutralise spreadsheet formula injection from network-sourced
+  strings.
+
+**Robustness**
+- Subnets are validated (IPv4, at most /16, gateway inside); reservations
+  must lie inside their subnet; one bad subnet no longer breaks the listing.
+- Import: unparseable cells skip the row with a warning instead of aborting;
+  unrecognised IP/MAC headers are guessed from the data; "label" beats
+  "hostname"; duplicate addresses are reported; netscout's own devices CSV
+  re-imports as labels only; dry-run counts match the real run.
+- Default interface skips VPN tunnels and virtual adapters; a remembered
+  interface is only reused when it is up with an address; default sweeps are
+  narrowed to a /24 on wide or link-local subnets.
+- Linux "any" (SLL2) frames, QinQ inner VLAN, IPv6 LLDP chassis IDs, binary
+  IDs rendered as hex, localized Windows `arp -a` output.
+- SQLite path escaping for `#`/`?`/`%`, fixed-width timestamps so SQL ordering
+  is chronological, observation rows pruned after 7 days.
+- Running under `sudo` on macOS hands the data directory back to the user;
+  ANSI colours are disabled when output is not a terminal; Windows console VT
+  mode is enabled for every command.
+
+**UI**
+- Background refreshes no longer discard a reservation form or unsaved drawer
+  edits; "last seen" sorts numerically; event list is trimmed; errors from
+  delete/clear actions are shown; scan CIDR can be cleared.
+
+**Docs & packaging**
+- `LICENSE` (MIT) and `THIRD_PARTY_NOTICES.md` added; README licence text
+  corrected; macOS Gatekeeper instructions updated for macOS 15 (xattr or
+  "Open Anyway"); Npcap wording fixed; release archives ship docs/, LICENSE
+  and notices so README links resolve.
+
 ## v0.7 — Phase 6 (prep): packaging + release
 
 - Release workflow on tag push: macOS universal binary (arm64 + amd64 via

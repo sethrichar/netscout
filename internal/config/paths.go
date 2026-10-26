@@ -30,7 +30,17 @@ func DataDir(override string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("creating data dir %q: %w", dir, err)
 	}
+	FixOwnership(dir)
 	return dir, nil
+}
+
+// FixOwnershipOfDBFiles chowns the database and its WAL/SHM side files.
+func FixOwnershipOfDBFiles(dbPath string) {
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		if _, err := os.Stat(dbPath + suffix); err == nil {
+			FixOwnership(dbPath + suffix)
+		}
+	}
 }
 
 // DBPath returns the SQLite database path inside dataDir.

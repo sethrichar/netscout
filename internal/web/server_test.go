@@ -87,6 +87,40 @@ func TestHostCheck(t *testing.T) {
 	if code, _ := call(t, ts, "GET", "/api/status", "", "evil.example.com"); code != 403 {
 		t.Errorf("foreign Host should be rejected, got %d", code)
 	}
+	// Cross-site "simple" POSTs carry Sec-Fetch-Site / Origin from the browser.
+	for _, h := range []map[string]string{
+		{"Sec-Fetch-Site": "cross-site"},
+		{"Origin": "http://evil.example.com"},
+		{"Origin": "http://evil.example.com", "Sec-Fetch-Site": "cross-site"},
+	} {
+		req, _ := http.NewRequest("POST", ts.URL+"/api/scan", strings.NewReader("{}"))
+		req.Header.Set("Content-Type", "text/plain")
+		for k, v := range h {
+			req.Header.Set(k, v)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != 403 {
+			t.Errorf("cross-site POST with %v should be refused, got %d", h, res.StatusCode)
+		}
+	}
+	// Same-origin browser requests and header-less tools pass.
+	req, _ := http.NewRequest("POST", ts.URL+"/api/conflicts/clear", strings.NewReader(`{"ip":"10.0.0.1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Origin", "http://127.0.0.1:1234")
+	if res, err := http.DefaultClient.Do(req); err != nil || res.StatusCode != 204 {
+		t.Errorf("same-origin POST should pass: %v %v", res, err)
+	}
+	// A text/plain body (what a cross-site form can forge) is not JSON.
+	req, _ = http.NewRequest("POST", ts.URL+"/api/conflicts/clear", strings.NewReader(`{"ip":"10.0.0.1"}`))
+	req.Header.Set("Content-Type", "text/plain")
+	if res, err := http.DefaultClient.Do(req); err != nil || res.StatusCode != 400 {
+		t.Errorf("text/plain JSON should be rejected: %v %v", res, err)
+	}
 	if code, _ := call(t, ts, "GET", "/api/status", "", ""); code != 200 {
 		t.Errorf("loopback Host should pass, got %d", code)
 	}
@@ -115,6 +149,12 @@ func TestDevicesAndIPAMFlow(t *testing.T) {
 		t.Fatalf("patch: %d %s", code, body)
 	}
 
+	if code, body = call(t, ts, "POST", "/api/subnets", `{"cidr":"fe80::/64"}`, ""); code != 400 {
+		t.Errorf("IPv6 subnet should be refused: %d %s", code, body)
+	}
+	if code, body = call(t, ts, "POST", "/api/subnets", `{"cidr":"10.0.0.0/8"}`, ""); code != 400 {
+		t.Errorf("/8 subnet should be refused: %d %s", code, body)
+	}
 	code, body = call(t, ts, "POST", "/api/subnets", `{"cidr":"10.0.0.0/24","name":"Dante","gateway":"10.0.0.1"}`, "")
 	if code != 201 {
 		t.Fatalf("subnet create: %d %s", code, body)

@@ -91,9 +91,15 @@ func DHCP(ctx Context, d *layers.DHCPv4) []model.Observation {
 	var out []model.Observation
 	switch msgType {
 	case layers.DHCPMsgTypeOffer, layers.DHCPMsgTypeAck:
-		// Server → client. The assigned address is authoritative.
+		// Server → client. Only an ACK is an address assignment; an OFFER is a
+		// proposal the client may never take (competing servers, rogue DHCP),
+		// so it is recorded as an attribute rather than a binding.
 		if ip := d.YourClientIP.String(); model.IsUsableIPv4(ip) {
-			client.IP = ip
+			if msgType == layers.DHCPMsgTypeAck {
+				client.IP = ip
+			} else {
+				client.Extra["dhcp_offered_ip"] = ip
+			}
 		}
 		if serverID == "" && ctx.SrcIP != nil {
 			serverID = ctx.SrcIP.String()
@@ -102,8 +108,17 @@ func DHCP(ctx Context, d *layers.DHCPv4) []model.Observation {
 			client.Extra["dhcp_server"] = serverID
 		}
 		out = append(out, client)
-		// The frame's source is the DHCP server (or relay) itself.
+		// The frame's source is the DHCP server — or a relay agent when the
+		// packet carries a giaddr, in which case the router forwarded it.
 		if ctx.SrcMAC != "" && ctx.SrcMAC != clientMAC && ctx.SrcIP != nil && model.IsUsableIPv4(ctx.SrcIP.String()) {
+			role := "server"
+			extra := map[string]string{"dhcp_msg_type": dhcpMsgName(msgType)}
+			if giaddr := d.RelayAgentIP.String(); model.IsUsableIPv4(giaddr) && (ctx.SrcIP.String() == giaddr || ctx.SrcIP.String() != serverID) {
+				role = "relay"
+				extra["dhcp_relay"] = giaddr
+				extra["dhcp_server"] = serverID
+			}
+			extra["dhcp_role"] = role
 			out = append(out, model.Observation{
 				MAC:       ctx.SrcMAC,
 				IP:        ctx.SrcIP.String(),
@@ -111,7 +126,7 @@ func DHCP(ctx Context, d *layers.DHCPv4) []model.Observation {
 				Timestamp: ctx.Time,
 				Interface: ctx.Iface,
 				VLAN:      ctx.VLAN,
-				Extra:     map[string]string{"dhcp_role": "server", "dhcp_msg_type": dhcpMsgName(msgType)},
+				Extra:     extra,
 			})
 		}
 	default:
